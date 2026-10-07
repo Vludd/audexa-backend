@@ -35,6 +35,44 @@ public class AudioFilesController : ControllerBase
         return Ok(audioFile);
     }
 
+    [HttpGet("{id:guid}/stream")]
+    public async Task<IActionResult> Stream(
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        var result = await _audioFileService.GetStreamAsync(
+            id,
+            cancellationToken);
+
+        if (result is null)
+        {
+            return NotFound();
+        }
+
+        var audioFile = result.Value.AudioFile;
+        var filePath = result.Value.FilePath;
+
+        var contentType = audioFile.Format.ToUpperInvariant() switch
+        {
+            "WAV" => "audio/wav",
+            "MP3" => "audio/mpeg",
+            _ => "application/octet-stream"
+        };
+
+        var stream = new FileStream(
+            filePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            64 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+        return new FileStreamResult(stream, contentType)
+        {
+            EnableRangeProcessing = true
+        };
+    }
+
     [HttpPost]
     public ActionResult<AudioFile> Create(CreateAudioFileRequest request)
     {

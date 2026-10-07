@@ -113,3 +113,11 @@ Desktop.ini
 *.bak
 *.swp
 *.swo
+
+# =========================
+# Compressed files
+# =========================
+*.zip
+*.rar
+*.tar.gz
+*.7z

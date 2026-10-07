@@ -144,6 +144,31 @@ public class AudioFileService : IAudioFileService
         }
     }
 
+    public async Task<(AudioFile AudioFile, string FilePath)?> GetStreamAsync(
+        Guid id,
+        CancellationToken cancellationToken = default)
+    {
+        var audioFile = await _db.AudioFiles
+            .AsNoTracking()
+            .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+
+        if (audioFile is null)
+        {
+            return null;
+        }
+
+        var filePath = Path.Combine(
+            _audioDirectory,
+            audioFile.StorageFileName);
+
+        if (!File.Exists(filePath))
+        {
+            return null;
+        }
+
+        return (audioFile, filePath);
+    }
+
     public AudioFile? Update(Guid id, UpdateAudioFileRequest request)
     {
         var audioFile = _db.AudioFiles
@@ -189,20 +214,20 @@ public class AudioFileService : IAudioFileService
     private static AudioMetadata ReadAudioMetadata(
         string path,
         string extension)
+    {
+        using WaveStream reader = extension switch
         {
-            using WaveStream reader = extension switch
-            {
-                ".wav" => new WaveFileReader(path),
-                ".mp3" => new Mp3FileReader(path),
-                _ => throw new InvalidOperationException(
-                    "Неподдерживаемый формат.")
-            };
+            ".wav" => new WaveFileReader(path),
+            ".mp3" => new Mp3FileReader(path),
+            _ => throw new InvalidOperationException(
+                "Неподдерживаемый формат.")
+        };
 
-            return new AudioMetadata(
-                reader.TotalTime,
-                reader.WaveFormat.SampleRate,
-                reader.WaveFormat.Channels);
-        }
+        return new AudioMetadata(
+            reader.TotalTime,
+            reader.WaveFormat.SampleRate,
+            reader.WaveFormat.Channels);
+    }
 
     private sealed record AudioMetadata(
         TimeSpan Duration,

@@ -16,6 +16,10 @@ public interface IAudioFileService
         IFormFile file,
         CancellationToken cancellationToken = default);
 
+    Task<(AudioFile AudioFile, string FilePath)?> GetStreamAsync(
+        Guid id,
+        CancellationToken cancellationToken = default);
+
     AudioFile? Update(Guid id, UpdateAudioFileRequest request);
 
     bool Delete(Guid id);
