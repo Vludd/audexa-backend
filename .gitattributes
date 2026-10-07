@@ -1,0 +1,25 @@
+# Auto detect text files and normalize line endings
+* text=auto
+
+# Source files
+*.cs text
+*.csproj text
+*.sln text
+*.json text
+*.xml text
+*.yml text
+*.yaml text
+*.md text
+*.http text
+
+# Keep shell scripts with LF
+*.sh text eol=lf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
