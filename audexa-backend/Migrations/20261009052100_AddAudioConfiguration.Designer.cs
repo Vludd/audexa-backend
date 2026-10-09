@@ -2,7 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
-using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using Microsoft.EntityFrameworkCore.Migrations;
 using audexa_backend.Data;
 
 #nullable disable
@@ -10,9 +10,10 @@ using audexa_backend.Data;
 namespace audexa_backend.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20261009052100_AddAudioConfiguration")]
+    partial class AddAudioConfiguration
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "8.0.19");
@@ -36,7 +37,6 @@ namespace audexa_backend.Migrations
                         .HasColumnType("INTEGER");
 
                     b.HasKey("Id");
-
                     b.ToTable("AudioConfigurations");
                 });
 
@@ -45,40 +45,29 @@ namespace audexa_backend.Migrations
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
-
                     b.Property<int>("Channels")
                         .HasColumnType("INTEGER");
-
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("TEXT");
-
                     b.Property<TimeSpan>("Duration")
                         .HasColumnType("TEXT");
-
                     b.Property<string>("FileName")
                         .IsRequired()
                         .HasColumnType("TEXT");
-
                     b.Property<string>("Format")
                         .IsRequired()
                         .HasColumnType("TEXT");
-
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasColumnType("TEXT");
-
                     b.Property<int>("SampleRate")
                         .HasColumnType("INTEGER");
-
                     b.Property<long>("Size")
                         .HasColumnType("INTEGER");
-
                     b.Property<string>("StorageFileName")
                         .IsRequired()
                         .HasColumnType("TEXT");
-
                     b.HasKey("Id");
-
                     b.ToTable("AudioFiles");
                 });
 
@@ -87,25 +76,18 @@ namespace audexa_backend.Migrations
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
-
                     b.Property<Guid>("AudioConfigurationId")
                         .HasColumnType("TEXT");
-
                     b.Property<string>("OutputId")
                         .IsRequired()
                         .HasColumnType("TEXT");
-
                     b.Property<Guid>("RoomId")
                         .HasColumnType("TEXT");
-
                     b.HasKey("Id");
-
                     b.HasIndex("AudioConfigurationId", "OutputId")
                         .IsUnique();
-
                     b.HasIndex("AudioConfigurationId", "RoomId")
                         .IsUnique();
-
                     b.ToTable("OutputMappings");
                 });
 
@@ -116,7 +98,6 @@ namespace audexa_backend.Migrations
                         .HasForeignKey("AudioConfigurationId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
-
                     b.Navigation("AudioConfiguration");
                 });
 

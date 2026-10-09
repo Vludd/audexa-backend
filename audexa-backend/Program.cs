@@ -37,8 +37,19 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlite($"Data Source={databasePath}"));
 
 builder.Services.AddScoped<IAudioFileService, AudioFileService>();
+builder.Services.AddSingleton<IAudioDeviceService, AudioDeviceService>();
+builder.Services.AddScoped<IAudioSettingsService, AudioSettingsService>();
+builder.Services.AddScoped<IAudioDiagnosticsService, AudioDiagnosticsService>();
 
 var app = builder.Build();
+
+// Apply database migrations on startup so packaged desktop deployments do not
+// require a separate EF CLI step.
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    db.Database.Migrate();
+}
 
 // HTTP pipeline
 
