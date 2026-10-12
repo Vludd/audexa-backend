@@ -100,6 +100,8 @@ namespace audexa_backend.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("RoomId");
+
                     b.HasIndex("AudioConfigurationId", "OutputId")
                         .IsUnique();
 
@@ -107,6 +109,32 @@ namespace audexa_backend.Migrations
                         .IsUnique();
 
                     b.ToTable("OutputMappings");
+                });
+
+            modelBuilder.Entity("audexa_backend.Models.Room", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("AudioFileId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Volume")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(100);
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AudioFileId");
+
+                    b.ToTable("Rooms");
                 });
 
             modelBuilder.Entity("audexa_backend.Models.OutputMapping", b =>
@@ -117,12 +145,33 @@ namespace audexa_backend.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
+                    b.HasOne("audexa_backend.Models.Room", null)
+                        .WithMany("OutputMappings")
+                        .HasForeignKey("RoomId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
                     b.Navigation("AudioConfiguration");
+                });
+
+            modelBuilder.Entity("audexa_backend.Models.Room", b =>
+                {
+                    b.HasOne("audexa_backend.Models.AudioFile", "AudioFile")
+                        .WithMany()
+                        .HasForeignKey("AudioFileId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("AudioFile");
                 });
 
             modelBuilder.Entity("audexa_backend.Models.AudioConfiguration", b =>
                 {
                     b.Navigation("Mappings");
+                });
+
+            modelBuilder.Entity("audexa_backend.Models.Room", b =>
+                {
+                    b.Navigation("OutputMappings");
                 });
 #pragma warning restore 612, 618
         }

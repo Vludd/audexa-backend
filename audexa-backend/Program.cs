@@ -40,6 +40,7 @@ builder.Services.AddScoped<IAudioFileService, AudioFileService>();
 builder.Services.AddSingleton<IAudioDeviceService, AudioDeviceService>();
 builder.Services.AddScoped<IAudioSettingsService, AudioSettingsService>();
 builder.Services.AddScoped<IAudioDiagnosticsService, AudioDiagnosticsService>();
+builder.Services.AddScoped<RoomService>();
 
 var app = builder.Build();
 
@@ -59,8 +60,8 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-app.UseHttpsRedirection();
-
+// Audexa runs as a local desktop backend.
+// The React frontend connects to the loopback HTTP endpoint.
 app.UseCors("Frontend");
 
 app.UseAuthorization();

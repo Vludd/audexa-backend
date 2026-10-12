@@ -125,19 +125,23 @@ public sealed class AudioSettingsService : IAudioSettingsService
                 "Translation output cannot be assigned to a room at the same time.");
         }
 
-        await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken);
+        await using var transaction =
+            await _db.Database.BeginTransactionAsync(cancellationToken);
 
         var configuration = await _db.AudioConfigurations
             .Include(x => x.Mappings)
-            .SingleOrDefaultAsync(x => x.Id == ConfigurationId, cancellationToken);
+            .SingleOrDefaultAsync(
+                x => x.Id == ConfigurationId,
+                cancellationToken);
 
         if (configuration is null)
         {
             configuration = new AudioConfiguration
             {
                 Id = ConfigurationId,
-                Version = 1
+                Version = 1,
             };
+
             _db.AudioConfigurations.Add(configuration);
         }
 
@@ -146,24 +150,34 @@ public sealed class AudioSettingsService : IAudioSettingsService
         configuration.TranslationOutputId = request.TranslationOutputId;
         configuration.UpdatedAt = DateTime.UtcNow;
 
-        _db.OutputMappings.RemoveRange(configuration.Mappings);
-        configuration.Mappings.Clear();
+        // Remove old mappings first.
+        // This avoids transient UNIQUE constraint violations when
+        // an existing room/output assignment is changed.
+        var existingMappings = configuration.Mappings.ToList();
+
+        if (existingMappings.Count > 0)
+        {
+            _db.OutputMappings.RemoveRange(existingMappings);
+            await _db.SaveChangesAsync(cancellationToken);
+        }
 
         foreach (var mapping in mappings)
         {
-            configuration.Mappings.Add(new OutputMapping
+            _db.OutputMappings.Add(new OutputMapping
             {
                 Id = Guid.NewGuid(),
                 AudioConfigurationId = ConfigurationId,
                 RoomId = mapping.RoomId,
-                OutputId = mapping.OutputId!
+                OutputId = mapping.OutputId!,
             });
         }
 
         await _db.SaveChangesAsync(cancellationToken);
+
         await transaction.CommitAsync(cancellationToken);
 
-        return ToDto(configuration);
+        // Return the actual persisted state from SQLite.
+        return await GetAsync(cancellationToken);
     }
 
     private static void ValidateRequest(UpdateAudioSettingsRequest request)

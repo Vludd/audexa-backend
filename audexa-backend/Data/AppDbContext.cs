@@ -16,6 +16,8 @@ public class AppDbContext : DbContext
 
     public DbSet<OutputMapping> OutputMappings => Set<OutputMapping>();
 
+    public DbSet<Room> Rooms => Set<Room>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -36,5 +38,30 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<OutputMapping>()
             .HasIndex(x => new { x.AudioConfigurationId, x.OutputId })
             .IsUnique();
+
+        modelBuilder.Entity<Room>()
+            .HasKey(x => x.Id);
+
+        modelBuilder.Entity<Room>()
+            .Property(x => x.Name)
+            .IsRequired()
+            .HasMaxLength(200);
+
+        modelBuilder.Entity<Room>()
+            .Property(x => x.Volume)
+            .IsRequired()
+            .HasDefaultValue(100);
+
+        modelBuilder.Entity<Room>()
+            .HasOne(x => x.AudioFile)
+            .WithMany()
+            .HasForeignKey(x => x.AudioFileId)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        modelBuilder.Entity<Room>()
+            .HasMany(x => x.OutputMappings)
+            .WithOne()
+            .HasForeignKey(x => x.RoomId)
+            .OnDelete(DeleteBehavior.Cascade);
     }
 }
