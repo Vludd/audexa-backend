@@ -1,6 +1,7 @@
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using System.Runtime.InteropServices;
+using System.Reflection;
 
 namespace audexa_backend.Services;
 
@@ -31,6 +32,7 @@ public sealed class AudioDeviceService : IAudioDeviceService
 
                 try
                 {
+                    var audioInfo = GetWasapiAudioInfo(device);
                     var outputCount = GetChannelCount(device);
                     var outputs = CreateGenericChannels(device.ID, outputCount, "output", "OUT");
 
@@ -43,7 +45,9 @@ public sealed class AudioDeviceService : IAudioDeviceService
                         outputCount,
                         0,
                         outputs,
-                        []));
+                        [],
+                        audioInfo.SampleRate,
+                        audioInfo.BufferSize));
 
                     wasapiRenderFound = true;
                 }
@@ -88,7 +92,9 @@ public sealed class AudioDeviceService : IAudioDeviceService
                         outputCount,
                         0,
                         CreateGenericChannels(deviceId, outputCount, "output", "OUT"),
-                        []));
+                        [],
+                        null,
+                        null));
                 }
             }
             catch (Exception ex)
@@ -120,7 +126,9 @@ public sealed class AudioDeviceService : IAudioDeviceService
                         0,
                         inputCount,
                         [],
-                        inputs));
+                        inputs,
+                        null,
+                        null));
                 }
                 catch (Exception ex)
                 {
@@ -140,6 +148,7 @@ public sealed class AudioDeviceService : IAudioDeviceService
                 try
                 {
                     using var asio = new AsioOut(driverName);
+                    var audioInfo = GetAsioAudioInfo(asio);
 
                     var outputs = Enumerable
                         .Range(0, asio.DriverOutputChannelCount)
@@ -168,7 +177,9 @@ public sealed class AudioDeviceService : IAudioDeviceService
                         outputs.Length,
                         inputs.Length,
                         outputs,
-                        inputs));
+                        inputs,
+                        audioInfo.SampleRate,
+                        audioInfo.BufferSize));
                 }
                 catch (Exception ex)
                 {
@@ -181,7 +192,9 @@ public sealed class AudioDeviceService : IAudioDeviceService
                         0,
                         0,
                         [],
-                        []));
+                        [],
+                        null,
+                        null));
 
                     enumerationError ??= ex.Message;
                 }
@@ -204,6 +217,79 @@ public sealed class AudioDeviceService : IAudioDeviceService
     {
         var device = FindDevice(deviceId);
         return device?.Outputs.Any(output => output.Id == outputId) == true;
+    }
+
+    private static (int? SampleRate, int? BufferSize) GetWasapiAudioInfo(MMDevice device)
+    {
+        try
+        {
+            var audioClient = device.AudioClient;
+            var sampleRate = audioClient.MixFormat.SampleRate;
+            var defaultPeriod = audioClient.DefaultDevicePeriod;
+            var bufferSize = sampleRate > 0 && defaultPeriod > 0
+                ? (int)Math.Round(sampleRate * (double)defaultPeriod / 10_000_000d)
+                : (int?)null;
+
+            return (sampleRate > 0 ? sampleRate : null, bufferSize);
+        }
+        catch
+        {
+            return (null, null);
+        }
+    }
+
+    private static (int? SampleRate, int? BufferSize) GetAsioAudioInfo(AsioOut asio)
+    {
+        // NAudio 2.x's AsioOut facade does not expose these capabilities publicly.
+        // Read them from its underlying ASIO driver when available; keep null if
+        // a driver does not expose the expected API rather than inventing values.
+        try
+        {
+            var driverField = typeof(AsioOut)
+                .GetFields(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+                .FirstOrDefault(field => field.FieldType.Name.Contains("ASIODriver", StringComparison.OrdinalIgnoreCase));
+
+            var driver = driverField?.GetValue(asio);
+            if (driver is null)
+                return (null, null);
+
+            int? sampleRate = null;
+            int? bufferSize = null;
+            var driverType = driver.GetType();
+
+            var sampleRateMethod = driverType.GetMethod(
+                "getSampleRate",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                binder: null,
+                types: Type.EmptyTypes,
+                modifiers: null);
+
+            var sampleRateValue = sampleRateMethod?.Invoke(driver, null);
+            if (sampleRateValue is double rate && rate > 0)
+                sampleRate = (int)Math.Round(rate);
+            else if (sampleRateValue is float floatRate && floatRate > 0)
+                sampleRate = (int)Math.Round(floatRate);
+            else if (sampleRateValue is int integerRate && integerRate > 0)
+                sampleRate = integerRate;
+
+            var bufferMethod = driverType.GetMethod(
+                "getBufferSize",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+            if (bufferMethod is not null)
+            {
+                var args = new object?[] { 0, 0, 0, 0 };
+                bufferMethod.Invoke(driver, args);
+                if (args[2] is int preferredBuffer && preferredBuffer > 0)
+                    bufferSize = preferredBuffer;
+            }
+
+            return (sampleRate, bufferSize);
+        }
+        catch
+        {
+            return (null, null);
+        }
     }
 
     private static int GetChannelCount(MMDevice device)

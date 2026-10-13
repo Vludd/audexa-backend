@@ -23,7 +23,9 @@ public sealed record AudioDeviceDto(
     int OutputCount,
     int InputCount,
     IReadOnlyList<AudioChannelDto> Outputs,
-    IReadOnlyList<AudioChannelDto> Inputs);
+    IReadOnlyList<AudioChannelDto> Inputs,
+    int? SampleRate = null,
+    int? BufferSize = null);
 
 public sealed record AudioChannelDto(
     string Id,
