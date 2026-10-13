@@ -1,4 +1,4 @@
-﻿using audexa_backend.Data;
+using audexa_backend.Data;
 using audexa_backend.DTOs.AudioFiles;
 using audexa_backend.Models;
 using Microsoft.AspNetCore.Http;
@@ -62,6 +62,8 @@ public class AudioFileService : IAudioFileService
             Size = request.Size,
             SampleRate = request.SampleRate,
             Channels = request.Channels,
+            Volume = NormalizeVolume(request.Volume),
+            VolumeDb = NormalizeVolumeDb(request.VolumeDb),
             CreatedAt = DateTime.UtcNow
         };
 
@@ -125,6 +127,8 @@ public class AudioFileService : IAudioFileService
                 Size = file.Length,
                 SampleRate = metadata.SampleRate,
                 Channels = metadata.Channels,
+                Volume = 100,
+                VolumeDb = 0,
                 CreatedAt = DateTime.UtcNow
             };
 
@@ -179,7 +183,15 @@ public class AudioFileService : IAudioFileService
             return null;
         }
 
-        audioFile.Name = request.Name;
+        audioFile.Name = request.Name.Trim();
+        if (request.Volume.HasValue)
+        {
+            audioFile.Volume = NormalizeVolume(request.Volume.Value);
+        }
+        if (request.VolumeDb.HasValue)
+        {
+            audioFile.VolumeDb = NormalizeVolumeDb(request.VolumeDb.Value);
+        }
 
         _db.SaveChanges();
 
@@ -200,6 +212,16 @@ public class AudioFileService : IAudioFileService
             _audioDirectory,
             audioFile.StorageFileName);
 
+        var usedByScenario = _db.ScenarioSteps
+            .Any(x => x.AudioFileId == id);
+
+        if (usedByScenario)
+        {
+            throw new AudioFileInUseException(
+                "SCENARIO_IN_USE",
+                "Audio file cannot be deleted because it is used by one or more scenarios.");
+        }
+
         _db.AudioFiles.Remove(audioFile);
         _db.SaveChanges();
 
@@ -209,6 +231,30 @@ public class AudioFileService : IAudioFileService
         }
 
         return true;
+    }
+
+    private static int NormalizeVolume(int volume)
+    {
+        if (volume is < 0 or > 100)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(volume),
+                "Audio file volume must be between 0 and 100.");
+        }
+
+        return volume;
+    }
+
+    private static int NormalizeVolumeDb(int volumeDb)
+    {
+        if (volumeDb is < -60 or > 12)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(volumeDb),
+                "Audio file gain must be between -60 and 12 dB.");
+        }
+
+        return volumeDb;
     }
 
     private static AudioMetadata ReadAudioMetadata(
@@ -233,4 +279,15 @@ public class AudioFileService : IAudioFileService
         TimeSpan Duration,
         int SampleRate,
         int Channels);
+}
+
+public sealed class AudioFileInUseException : Exception
+{
+    public AudioFileInUseException(string code, string message)
+        : base(message)
+    {
+        Code = code;
+    }
+
+    public string Code { get; }
 }

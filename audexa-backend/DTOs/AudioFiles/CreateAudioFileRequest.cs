@@ -15,4 +15,8 @@ public class CreateAudioFileRequest
     public int SampleRate { get; set; }
 
     public int Channels { get; set; }
+
+    public int Volume { get; set; } = 100;
+
+    public int VolumeDb { get; set; }
 }

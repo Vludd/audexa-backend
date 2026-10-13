@@ -41,6 +41,7 @@ builder.Services.AddSingleton<IAudioDeviceService, AudioDeviceService>();
 builder.Services.AddScoped<IAudioSettingsService, AudioSettingsService>();
 builder.Services.AddScoped<IAudioDiagnosticsService, AudioDiagnosticsService>();
 builder.Services.AddScoped<RoomService>();
+builder.Services.AddScoped<ScenarioService>();
 
 var app = builder.Build();
 

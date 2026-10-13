@@ -1,4 +1,4 @@
-﻿using audexa_backend.DTOs.AudioFiles;
+using audexa_backend.DTOs.AudioFiles;
 using audexa_backend.Models;
 using audexa_backend.Services;
 using Microsoft.AspNetCore.Mvc;
@@ -115,26 +115,47 @@ public class AudioFilesController : ControllerBase
         Guid id,
         UpdateAudioFileRequest request)
     {
-        var audioFile = _audioFileService.Update(id, request);
-
-        if (audioFile is null)
+        try
         {
-            return NotFound();
-        }
+            var audioFile = _audioFileService.Update(id, request);
 
-        return Ok(audioFile);
+            if (audioFile is null)
+            {
+                return NotFound();
+            }
+
+            return Ok(audioFile);
+        }
+        catch (ArgumentOutOfRangeException ex)
+        {
+            return BadRequest(new
+            {
+                message = ex.Message
+            });
+        }
     }
 
     [HttpDelete("{id:guid}")]
     public IActionResult Delete(Guid id)
     {
-        var deleted = _audioFileService.Delete(id);
-
-        if (!deleted)
+        try
         {
-            return NotFound();
-        }
+            var deleted = _audioFileService.Delete(id);
 
-        return NoContent();
+            if (!deleted)
+            {
+                return NotFound();
+            }
+
+            return NoContent();
+        }
+        catch (AudioFileInUseException ex)
+        {
+            return Conflict(new
+            {
+                code = ex.Code,
+                message = ex.Message
+            });
+        }
     }
 }

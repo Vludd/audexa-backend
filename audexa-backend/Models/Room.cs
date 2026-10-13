@@ -6,9 +6,6 @@ public class Room
 
     public string Name { get; set; } = string.Empty;
 
-    public Guid? AudioFileId { get; set; }
-
-    public AudioFile? AudioFile { get; set; }
 
     public int Volume { get; set; } = 100;
 

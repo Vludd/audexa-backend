@@ -23,7 +23,6 @@ public sealed class RoomService
             .Select(x => new RoomDto(
                 x.Id,
                 x.Name,
-                x.AudioFileId,
                 x.Volume))
             .ToListAsync(cancellationToken);
     }
@@ -38,7 +37,6 @@ public sealed class RoomService
             .Select(x => new RoomDto(
                 x.Id,
                 x.Name,
-                x.AudioFileId,
                 x.Volume))
             .FirstOrDefaultAsync(cancellationToken);
     }
@@ -52,18 +50,11 @@ public sealed class RoomService
         ValidateName(name);
         ValidateVolume(request.Volume);
 
-        if (request.AudioFileId.HasValue)
-        {
-            await ValidateAudioFileAsync(
-                request.AudioFileId.Value,
-                cancellationToken);
-        }
 
         var room = new Room
         {
             Id = Guid.NewGuid(),
             Name = name,
-            AudioFileId = request.AudioFileId,
             Volume = request.Volume
         };
 
@@ -94,15 +85,8 @@ public sealed class RoomService
         ValidateName(name);
         ValidateVolume(request.Volume);
 
-        if (request.AudioFileId.HasValue)
-        {
-            await ValidateAudioFileAsync(
-                request.AudioFileId.Value,
-                cancellationToken);
-        }
 
         room.Name = name;
-        room.AudioFileId = request.AudioFileId;
         room.Volume = request.Volume;
 
         await _db.SaveChangesAsync(cancellationToken);
@@ -124,28 +108,21 @@ public sealed class RoomService
             return false;
         }
 
+        var usedByScenario = await _db.ScenarioSteps
+            .AnyAsync(x => x.RoomId == id, cancellationToken);
+
+        if (usedByScenario)
+        {
+            throw new RoomValidationException(
+                "SCENARIO_IN_USE",
+                "Room cannot be deleted because it is used by one or more scenarios.");
+        }
+
         _db.Rooms.Remove(room);
 
         await _db.SaveChangesAsync(cancellationToken);
 
         return true;
-    }
-
-    private async Task ValidateAudioFileAsync(
-        Guid audioFileId,
-        CancellationToken cancellationToken)
-    {
-        var exists = await _db.AudioFiles
-            .AnyAsync(
-                x => x.Id == audioFileId,
-                cancellationToken);
-
-        if (!exists)
-        {
-            throw new RoomValidationException(
-                "AUDIO_FILE_NOT_FOUND",
-                $"Audio file '{audioFileId}' was not found.");
-        }
     }
 
     private static void ValidateName(string name)
@@ -180,7 +157,6 @@ public sealed class RoomService
         return new RoomDto(
             room.Id,
             room.Name,
-            room.AudioFileId,
             room.Volume);
     }
 }

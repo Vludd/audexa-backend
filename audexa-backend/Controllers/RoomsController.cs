@@ -59,7 +59,11 @@ public sealed class RoomsController : ControllerBase
         }
         catch (RoomValidationException ex)
         {
-            return BadRequest(new
+            var status = ex.Code == "SCENARIO_IN_USE"
+                ? StatusCodes.Status409Conflict
+                : StatusCodes.Status400BadRequest;
+
+            return StatusCode(status, new
             {
                 code = ex.Code,
                 message = ex.Message
@@ -89,7 +93,11 @@ public sealed class RoomsController : ControllerBase
         }
         catch (RoomValidationException ex)
         {
-            return BadRequest(new
+            var status = ex.Code == "SCENARIO_IN_USE"
+                ? StatusCodes.Status409Conflict
+                : StatusCodes.Status400BadRequest;
+
+            return StatusCode(status, new
             {
                 code = ex.Code,
                 message = ex.Message
@@ -102,15 +110,30 @@ public sealed class RoomsController : ControllerBase
         Guid id,
         CancellationToken cancellationToken)
     {
-        var deleted = await _roomService.DeleteAsync(
-            id,
-            cancellationToken);
-
-        if (!deleted)
+        try
         {
-            return NotFound();
-        }
+            var deleted = await _roomService.DeleteAsync(
+                id,
+                cancellationToken);
 
-        return NoContent();
+            if (!deleted)
+            {
+                return NotFound();
+            }
+
+            return NoContent();
+        }
+        catch (RoomValidationException ex)
+        {
+            var status = ex.Code == "SCENARIO_IN_USE"
+                ? StatusCodes.Status409Conflict
+                : StatusCodes.Status400BadRequest;
+
+            return StatusCode(status, new
+            {
+                code = ex.Code,
+                message = ex.Message
+            });
+        }
     }
 }

@@ -1,4 +1,4 @@
-﻿using audexa_backend.Models;
+using audexa_backend.Models;
 using Microsoft.EntityFrameworkCore;
 
 namespace audexa_backend.Data;
@@ -17,6 +17,10 @@ public class AppDbContext : DbContext
     public DbSet<OutputMapping> OutputMappings => Set<OutputMapping>();
 
     public DbSet<Room> Rooms => Set<Room>();
+
+    public DbSet<Scenario> Scenarios => Set<Scenario>();
+
+    public DbSet<ScenarioStep> ScenarioSteps => Set<ScenarioStep>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -39,6 +43,16 @@ public class AppDbContext : DbContext
             .HasIndex(x => new { x.AudioConfigurationId, x.OutputId })
             .IsUnique();
 
+        modelBuilder.Entity<AudioFile>()
+            .Property(x => x.Volume)
+            .IsRequired()
+            .HasDefaultValue(100);
+
+        modelBuilder.Entity<AudioFile>()
+            .Property(x => x.VolumeDb)
+            .IsRequired()
+            .HasDefaultValue(0);
+
         modelBuilder.Entity<Room>()
             .HasKey(x => x.Id);
 
@@ -52,16 +66,74 @@ public class AppDbContext : DbContext
             .IsRequired()
             .HasDefaultValue(100);
 
-        modelBuilder.Entity<Room>()
-            .HasOne(x => x.AudioFile)
-            .WithMany()
-            .HasForeignKey(x => x.AudioFileId)
-            .OnDelete(DeleteBehavior.SetNull);
 
         modelBuilder.Entity<Room>()
             .HasMany(x => x.OutputMappings)
             .WithOne()
             .HasForeignKey(x => x.RoomId)
             .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<Scenario>()
+            .HasKey(x => x.Id);
+
+        modelBuilder.Entity<Scenario>()
+            .Property(x => x.Name)
+            .IsRequired()
+            .HasMaxLength(200);
+
+        modelBuilder.Entity<Scenario>()
+            .Property(x => x.Description)
+            .IsRequired()
+            .HasMaxLength(2000);
+
+        modelBuilder.Entity<Scenario>()
+            .Property(x => x.Status)
+            .IsRequired()
+            .HasMaxLength(32);
+
+        modelBuilder.Entity<Scenario>()
+            .Property(x => x.PlayMode)
+            .IsRequired()
+            .HasMaxLength(32);
+
+        modelBuilder.Entity<Scenario>()
+            .Property(x => x.Repeat)
+            .IsRequired()
+            .HasMaxLength(32);
+
+        modelBuilder.Entity<Scenario>()
+            .HasMany(x => x.Steps)
+            .WithOne(x => x.Scenario)
+            .HasForeignKey(x => x.ScenarioId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<ScenarioStep>()
+            .HasKey(x => x.Id);
+
+        modelBuilder.Entity<ScenarioStep>()
+            .Property(x => x.Order)
+            .IsRequired();
+
+
+        modelBuilder.Entity<ScenarioStep>()
+            .Property(x => x.DelayMs)
+            .IsRequired()
+            .HasDefaultValue(0);
+
+        modelBuilder.Entity<ScenarioStep>()
+            .HasIndex(x => new { x.ScenarioId, x.Order })
+            .IsUnique();
+
+        modelBuilder.Entity<ScenarioStep>()
+            .HasOne(x => x.Room)
+            .WithMany()
+            .HasForeignKey(x => x.RoomId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<ScenarioStep>()
+            .HasOne(x => x.AudioFile)
+            .WithMany()
+            .HasForeignKey(x => x.AudioFileId)
+            .OnDelete(DeleteBehavior.Restrict);
     }
 }

@@ -77,6 +77,16 @@ namespace audexa_backend.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<int>("Volume")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(100);
+
+                    b.Property<int>("VolumeDb")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(0);
+
                     b.HasKey("Id");
 
                     b.ToTable("AudioFiles");
@@ -117,9 +127,6 @@ namespace audexa_backend.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
 
-                    b.Property<Guid?>("AudioFileId")
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(200)
@@ -132,9 +139,87 @@ namespace audexa_backend.Migrations
 
                     b.HasKey("Id");
 
+                    b.ToTable("Rooms");
+                });
+
+            modelBuilder.Entity("audexa_backend.Models.Scenario", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Description")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PlayMode")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Repeat")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("StopPrevious")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("Scenarios");
+                });
+
+            modelBuilder.Entity("audexa_backend.Models.ScenarioStep", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("AudioFileId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("DelayMs")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER")
+                        .HasDefaultValue(0);
+
+                    b.Property<int>("Order")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("RoomId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ScenarioId")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
                     b.HasIndex("AudioFileId");
 
-                    b.ToTable("Rooms");
+                    b.HasIndex("RoomId");
+
+                    b.HasIndex("ScenarioId", "Order")
+                        .IsUnique();
+
+                    b.ToTable("ScenarioSteps");
                 });
 
             modelBuilder.Entity("audexa_backend.Models.OutputMapping", b =>
@@ -154,14 +239,31 @@ namespace audexa_backend.Migrations
                     b.Navigation("AudioConfiguration");
                 });
 
-            modelBuilder.Entity("audexa_backend.Models.Room", b =>
+            modelBuilder.Entity("audexa_backend.Models.ScenarioStep", b =>
                 {
                     b.HasOne("audexa_backend.Models.AudioFile", "AudioFile")
                         .WithMany()
                         .HasForeignKey("AudioFileId")
-                        .OnDelete(DeleteBehavior.SetNull);
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("audexa_backend.Models.Room", "Room")
+                        .WithMany()
+                        .HasForeignKey("RoomId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("audexa_backend.Models.Scenario", "Scenario")
+                        .WithMany("Steps")
+                        .HasForeignKey("ScenarioId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
 
                     b.Navigation("AudioFile");
+
+                    b.Navigation("Room");
+
+                    b.Navigation("Scenario");
                 });
 
             modelBuilder.Entity("audexa_backend.Models.AudioConfiguration", b =>
@@ -172,6 +274,11 @@ namespace audexa_backend.Migrations
             modelBuilder.Entity("audexa_backend.Models.Room", b =>
                 {
                     b.Navigation("OutputMappings");
+                });
+
+            modelBuilder.Entity("audexa_backend.Models.Scenario", b =>
+                {
+                    b.Navigation("Steps");
                 });
 #pragma warning restore 612, 618
         }
