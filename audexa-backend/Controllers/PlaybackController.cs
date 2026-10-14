@@ -22,6 +22,20 @@ public sealed class PlaybackController : ControllerBase
         catch (PlaybackException ex) { return BadRequest(new { code = ex.Code, message = ex.Message }); }
     }
 
+    [HttpPost("pause")]
+    public async Task<ActionResult<PlaybackStateDto>> Pause(CancellationToken cancellationToken)
+    {
+        await _playback.PauseAsync(cancellationToken);
+        return Ok(_playback.GetState());
+    }
+
+    [HttpPost("resume")]
+    public async Task<ActionResult<PlaybackStateDto>> Resume(CancellationToken cancellationToken)
+    {
+        await _playback.ResumeAsync(cancellationToken);
+        return Ok(_playback.GetState());
+    }
+
     [HttpPost("stop")]
     public async Task<ActionResult<PlaybackStateDto>> Stop(CancellationToken cancellationToken)
     {
@@ -34,5 +48,33 @@ public sealed class PlaybackController : ControllerBase
     {
         await _playback.StopRoomAsync(id, cancellationToken);
         return Ok(_playback.GetState());
+    }
+
+    [HttpPatch("rooms/{id:guid}/volume")]
+    public async Task<ActionResult<PlaybackStateDto>> SetRoomVolume(Guid id, [FromBody] PlaybackVolumeRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _playback.SetRoomVolumeAsync(id, request.Value, cancellationToken);
+            return Ok(_playback.GetState());
+        }
+        catch (PlaybackException ex)
+        {
+            return BadRequest(new { code = ex.Code, message = ex.Message });
+        }
+    }
+
+    [HttpPatch("audio/{id:guid}/gain")]
+    public async Task<ActionResult<PlaybackStateDto>> SetAudioGain(Guid id, [FromBody] PlaybackVolumeRequest request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _playback.SetAudioGainAsync(id, request.Value, cancellationToken);
+            return Ok(_playback.GetState());
+        }
+        catch (PlaybackException ex)
+        {
+            return BadRequest(new { code = ex.Code, message = ex.Message });
+        }
     }
 }
