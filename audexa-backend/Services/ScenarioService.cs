@@ -8,7 +8,7 @@ namespace audexa_backend.Services;
 public sealed class ScenarioService
 {
     private static readonly string[] ValidStatuses = ["active", "inactive"];
-    private static readonly string[] ValidPlayModes = ["sequential", "parallel"];
+    private static readonly string[] ValidPlayModes = ["sequential"];
     private static readonly string[] ValidRepeats = ["once", "loop"];
 
     private readonly AppDbContext _db;

@@ -43,6 +43,8 @@ builder.Services.AddScoped<IAudioDiagnosticsService, AudioDiagnosticsService>();
 builder.Services.AddScoped<RoomService>();
 builder.Services.AddScoped<ScenarioService>();
 builder.Services.AddScoped<ScheduleService>();
+builder.Services.AddSingleton<IPlaybackEngine, PlaybackEngine>();
+builder.Services.AddHostedService<ScenarioSchedulerService>();
 
 var app = builder.Build();
 
