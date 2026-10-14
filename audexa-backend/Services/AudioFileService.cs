@@ -1,7 +1,6 @@
 using audexa_backend.Data;
 using audexa_backend.DTOs.AudioFiles;
 using audexa_backend.Models;
-using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using NAudio.Wave;
 
@@ -79,13 +78,13 @@ public class AudioFileService : IAudioFileService
     {
         if (file.Length == 0)
         {
-            throw new InvalidOperationException("Файл пустой.");
+            throw new InvalidOperationException("The file is empty.");
         }
 
         if (file.Length > MaxFileSize)
         {
             throw new InvalidOperationException(
-                "Размер файла не должен превышать 500 MB.");
+                "The file size must not exceed 500 MB.");
         }
 
         var originalFileName = Path.GetFileName(file.FileName);
@@ -94,7 +93,7 @@ public class AudioFileService : IAudioFileService
         if (!AllowedExtensions.Contains(extension))
         {
             throw new InvalidOperationException(
-                "Поддерживаются только WAV и MP3.");
+                "Only WAV and MP3 files are supported.");
         }
 
         var id = Guid.NewGuid();
@@ -266,7 +265,7 @@ public class AudioFileService : IAudioFileService
             ".wav" => new WaveFileReader(path),
             ".mp3" => new Mp3FileReader(path),
             _ => throw new InvalidOperationException(
-                "Неподдерживаемый формат.")
+                "Unsupported format.")
         };
 
         return new AudioMetadata(
