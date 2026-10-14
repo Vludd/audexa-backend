@@ -92,6 +92,44 @@ namespace audexa_backend.Migrations
                     b.ToTable("AudioFiles");
                 });
 
+            modelBuilder.Entity("audexa_backend.Models.Schedule", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Days")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("Enabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Repeat")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ScenarioId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<TimeSpan>("Time")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ScenarioId");
+
+                    b.ToTable("Schedules");
+                });
+
             modelBuilder.Entity("audexa_backend.Models.OutputMapping", b =>
                 {
                     b.Property<Guid>("Id")
@@ -237,6 +275,17 @@ namespace audexa_backend.Migrations
                         .IsRequired();
 
                     b.Navigation("AudioConfiguration");
+                });
+
+            modelBuilder.Entity("audexa_backend.Models.Schedule", b =>
+                {
+                    b.HasOne("audexa_backend.Models.Scenario", "Scenario")
+                        .WithMany()
+                        .HasForeignKey("ScenarioId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Scenario");
                 });
 
             modelBuilder.Entity("audexa_backend.Models.ScenarioStep", b =>

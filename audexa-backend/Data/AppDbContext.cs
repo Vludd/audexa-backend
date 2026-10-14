@@ -22,6 +22,8 @@ public class AppDbContext : DbContext
 
     public DbSet<ScenarioStep> ScenarioSteps => Set<ScenarioStep>();
 
+    public DbSet<Schedule> Schedules => Set<Schedule>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -123,6 +125,32 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<ScenarioStep>()
             .HasIndex(x => new { x.ScenarioId, x.Order })
             .IsUnique();
+
+        modelBuilder.Entity<Schedule>()
+            .HasKey(x => x.Id);
+
+        modelBuilder.Entity<Schedule>()
+            .Property(x => x.Time)
+            .IsRequired();
+
+        modelBuilder.Entity<Schedule>()
+            .Property(x => x.Days)
+            .IsRequired()
+            .HasMaxLength(64);
+
+        modelBuilder.Entity<Schedule>()
+            .Property(x => x.Repeat)
+            .IsRequired()
+            .HasMaxLength(16);
+
+        modelBuilder.Entity<Schedule>()
+            .HasOne(x => x.Scenario)
+            .WithMany()
+            .HasForeignKey(x => x.ScenarioId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<Schedule>()
+            .HasIndex(x => x.ScenarioId);
 
         modelBuilder.Entity<ScenarioStep>()
             .HasOne(x => x.Room)
