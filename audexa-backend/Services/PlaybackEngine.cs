@@ -120,16 +120,27 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             task = _runTask;
         }
 
-        if (cts is null) return;
+        if (cts is null)
+        {
+            NormalizeStoppedSteps();
+            return;
+        }
 
         cts.Cancel();
         lock (_sync) _active?.Stop();
 
         if (task is not null)
         {
-            try { await task.WaitAsync(cancellationToken); }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+            // Once a stop has been requested, wait for the playback worker to
+            // finish its cancellation path. Returning on the HTTP request token
+            // could expose an intermediate snapshot before terminal cleanup.
+            try { await task; }
+            catch (OperationCanceledException) { }
         }
+
+        // Keep the API snapshot consistent even if a late state update raced
+        // with the worker's terminal transition. The worker is complete here.
+        NormalizeStoppedSteps();
     }
 
     public Task StopRoomAsync(Guid roomId, CancellationToken cancellationToken = default)
@@ -421,6 +432,9 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
     {
         lock (_sync)
         {
+            // A terminal playback snapshot must never be moved back to an
+            // active step state by a delayed update.
+            if (_state.Status is "idle" or "stopped" or "error") return;
             if (_state.Steps.Count == 0) return;
             var steps = _state.Steps.ToList();
             var index = Math.Clamp(stepNumber - 1, 0, steps.Count - 1);
@@ -448,6 +462,33 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
                 CurrentStep = stepNumber,
                 NextStep = next,
                 Rooms = BuildRoomStates(steps),
+                Steps = steps
+            };
+        }
+    }
+
+    private void NormalizeStoppedSteps()
+    {
+        lock (_sync)
+        {
+            // Only normalize a stopped run. Another run may have started while
+            // this StopAsync caller was awaiting the previous worker.
+            if (_state.Status != "stopped") return;
+
+            var steps = _state.Steps
+                .Select(step => step with
+                {
+                    Status = step.Status is "playing" or "paused" or "waiting"
+                        ? "stopped"
+                        : step.Status,
+                    DelayRemainingSeconds = 0
+                })
+                .ToList();
+
+            _state = _state with
+            {
+                NextStep = null,
+                Rooms = [],
                 Steps = steps
             };
         }
