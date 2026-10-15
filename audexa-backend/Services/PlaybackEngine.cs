@@ -495,9 +495,12 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         return stepStatus switch
         {
             "playing" => "playing",
-            "waiting" or "paused" => "waiting",
+            "waiting" => "waiting",
+            "paused" => "paused",
+            "stopped" or "finished" => "stopped",
+            "pending" => "idle",
             "error" => "error",
-            _ => "stopped"
+            _ => throw new InvalidOperationException($"Unknown playback step status: '{stepStatus}'.")
         };
     }
 
@@ -522,11 +525,39 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         lock (_sync)
         {
             var steps = _state.Steps.ToList();
-            if (status == "idle")
+            for (var i = 0; i < steps.Count; i++)
             {
-                for (var i = 0; i < steps.Count; i++)
-                    if (steps[i].Status is "pending" or "playing" or "waiting")
-                        steps[i] = steps[i] with { Status = "finished" };
+                var step = steps[i];
+
+                if (status == "idle" && (step.Status is "pending" or "playing" or "waiting"))
+                {
+                    // Reaching the end of the run is a normal completion.
+                    steps[i] = step with
+                    {
+                        Status = "finished",
+                        DelayRemainingSeconds = 0
+                    };
+                }
+                else if (status == "stopped" && (step.Status is "playing" or "paused" or "waiting"))
+                {
+                    // A stopped scenario must not leave an active/waiting step
+                    // (or its countdown) in the terminal snapshot.
+                    steps[i] = step with
+                    {
+                        Status = "stopped",
+                        DelayRemainingSeconds = 0
+                    };
+                }
+                else if (status == "error" && step.Step == _state.CurrentStep &&
+                         (step.Status is "playing" or "paused" or "waiting"))
+                {
+                    steps[i] = step with
+                    {
+                        Status = "error",
+                        DelayRemainingSeconds = 0,
+                        Error = error
+                    };
+                }
             }
 
             _state = _state with
