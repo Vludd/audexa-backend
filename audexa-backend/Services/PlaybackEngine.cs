@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using System.Globalization;
+using System.Runtime.InteropServices;
 
 namespace audexa_backend.Services;
 
@@ -32,8 +33,6 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
 
     public async Task<PlaybackStateDto> StartScenarioAsync(Guid scenarioId, CancellationToken cancellationToken = default)
     {
-        await StopAsync(cancellationToken);
-
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
@@ -72,6 +71,16 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             if (!File.Exists(path))
                 throw new PlaybackException("AUDIO_FILE_MISSING", $"Audio file '{step.AudioFile.FileName}' is missing.");
         }
+
+        // Validate the requested scenario before touching an existing playback.
+        // This prevents an invalid scenario request from stopping a valid run.
+        var currentStatus = GetState().Status;
+        var hasActivePlayback = currentStatus is "starting" or "playing" or "paused" or "waiting";
+        if (hasActivePlayback && !scenario.StopPrevious)
+            throw new PlaybackException("PLAYBACK_ALREADY_ACTIVE", "Another scenario is already running. Parallel scenario playback is not supported, and this scenario is configured not to stop the active one.");
+
+        if (hasActivePlayback)
+            await StopAsync(cancellationToken);
 
         var cts = new CancellationTokenSource();
         var stepStates = steps.Select((step, index) => new PlaybackStepStateDto(
@@ -143,12 +152,22 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         NormalizeStoppedSteps();
     }
 
-    public Task StopRoomAsync(Guid roomId, CancellationToken cancellationToken = default)
+    public Task SkipStepAsync(Guid roomId, CancellationToken cancellationToken = default)
     {
         lock (_sync)
         {
-            if (_active?.RoomId == roomId)
-                _active.RequestSkip();
+            if (_active is null || _state.Status is not ("playing" or "waiting" or "paused"))
+                throw new PlaybackException("NO_ACTIVE_STEP", "There is no active playback step to skip.");
+
+            if (_active.RoomId != roomId)
+                throw new PlaybackException("ACTIVE_STEP_CHANGED", "The active step has changed. Refresh playback state and try again.");
+
+            if (!_devices.IsDeviceAvailable(_active.DeviceId))
+                throw new PlaybackException(
+                    "DEVICE_UNAVAILABLE",
+                    "Аудиоустройство отключено или недоступно. Подключите устройство и запустите сценарий повторно.");
+
+            _active.RequestSkip();
         }
 
         return Task.CompletedTask;
@@ -239,6 +258,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
                     var stepNumber = i + 1;
 
                     var runtime = new PlaybackRuntime(
+                        deviceId,
                         step.RoomId,
                         step.AudioFileId,
                         step.Room.Volume,
@@ -320,7 +340,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         }
         catch (Exception ex)
         {
-            SetStateTerminal("error", scenario, ex.Message);
+            SetStateTerminal("error", scenario, GetFriendlyPlaybackError(ex));
         }
         finally
         {
@@ -360,18 +380,41 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             runtime);
 
         runtime.Attach(output, provider);
-
-        output.Init(provider);
-        output.Play();
+        output.PlaybackStopped += (_, args) =>
+        {
+            if (args.Exception is not null)
+                runtime.MarkOutputError(args.Exception);
+        };
 
         var started = DateTime.UtcNow;
+        var lastDeviceCheck = DateTime.MinValue;
         var duration = Math.Max(0.001, audio.Duration.TotalSeconds);
 
         try
         {
+            output.Init(provider);
+            output.Play();
+
             while (output.PlaybackState != PlaybackState.Stopped)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+
+                // Some WASAPI failures leave NAudio reporting PlaybackState.Playing
+                // even though the endpoint has been invalidated and no sound is
+                // produced. Check the selected endpoint independently of the
+                // output object's state, and surface native callback exceptions.
+                if (runtime.OutputError is { } outputError)
+                    throw CreateOutputFailure(outputError);
+
+                var now = DateTime.UtcNow;
+                if (now - lastDeviceCheck >= TimeSpan.FromMilliseconds(300))
+                {
+                    lastDeviceCheck = now;
+                    if (!_devices.IsDeviceAvailable(deviceId))
+                        throw new PlaybackException(
+                            "DEVICE_UNAVAILABLE",
+                            "Аудиоустройство отключено или недоступно. Подключите устройство и запустите сценарий повторно.");
+                }
 
                 if (runtime.SkipRequested)
                 {
@@ -386,6 +429,20 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
                     while (runtime.PauseRequested && !runtime.SkipRequested)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
+
+                        if (runtime.OutputError is { } pausedOutputError)
+                            throw CreateOutputFailure(pausedOutputError);
+
+                        var pausedNow = DateTime.UtcNow;
+                        if (pausedNow - lastDeviceCheck >= TimeSpan.FromMilliseconds(300))
+                        {
+                            lastDeviceCheck = pausedNow;
+                            if (!_devices.IsDeviceAvailable(deviceId))
+                                throw new PlaybackException(
+                                    "DEVICE_UNAVAILABLE",
+                                    "Аудиоустройство отключено или недоступно. Подключите устройство и запустите сценарий повторно.");
+                        }
+
                         await Task.Delay(100, cancellationToken);
                     }
 
@@ -420,10 +477,37 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
                 if (output.PlaybackState == PlaybackState.Stopped)
                     break;
             }
+
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                if (runtime.OutputError is { } stoppedOutputError)
+                    throw CreateOutputFailure(stoppedOutputError);
+
+                // A skip request can also call Stop() on an already-invalidated
+                // WASAPI client. Do not let that turn a device failure into a
+                // successful skip followed by a permanently silent next step.
+                if (!_devices.IsDeviceAvailable(deviceId))
+                    throw new PlaybackException(
+                        "DEVICE_UNAVAILABLE",
+                        "Аудиоустройство отключено или недоступно. Подключите устройство и запустите сценарий повторно.");
+            }
+
+            // A stopped output is not necessarily a successfully completed file:
+            // unplugging/disabling a device can stop the native output early.
+            // Do not silently mark that step as finished and continue the scenario.
+            if (!runtime.EndOfStream && !runtime.SkipRequested && !cancellationToken.IsCancellationRequested)
+            {
+                throw new PlaybackException(
+                    "AUDIO_OUTPUT_STOPPED",
+                    "Аудиовыход остановился до завершения файла. Проверьте аудиоустройство и сопоставление выхода.");
+            }
         }
         finally
         {
-            output.Stop();
+            // Stop can itself throw after Windows invalidates a WASAPI endpoint.
+            // Do not let cleanup replace the original playback/device error.
+            try { output.Stop(); }
+            catch (Exception ex) { runtime.MarkOutputError(ex); }
             runtime.Detach();
         }
     }
@@ -616,6 +700,37 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         }
     }
 
+    private static Exception CreateOutputFailure(Exception exception)
+    {
+        var message = GetFriendlyPlaybackError(exception);
+        return new PlaybackException("AUDIO_OUTPUT_ERROR", message);
+    }
+
+    private static string GetFriendlyPlaybackError(Exception exception)
+    {
+        // AUDCLNT_E_DEVICE_INVALIDATED: the WASAPI endpoint was removed or
+        // invalidated while the stream was active. Avoid leaking a raw HRESULT
+        // to the operator; the stable code remains available in the log/API.
+        const int deviceInvalidated = unchecked((int)0x88890004);
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current.HResult == deviceInvalidated ||
+                current.Message.Contains("0x88890004", StringComparison.OrdinalIgnoreCase) ||
+                current.Message.Contains("AUDCLNT_E_DEVICE_INVALIDATED", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Аудиоустройство отключено во время воспроизведения. Подключите устройство и запустите сценарий повторно.";
+            }
+        }
+
+        if (exception is PlaybackException playbackException)
+            return playbackException.Message;
+
+        if (exception is COMException || exception.InnerException is COMException)
+            return "Ошибка аудиоустройства во время воспроизведения. Проверьте подключение устройства и сопоставление выхода.";
+
+        return exception.Message;
+    }
+
     private static string GetAudioPath(string storageFileName)
     {
         var appDataPath = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
@@ -685,16 +800,24 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         private RoutedWaveProvider? _provider;
         private IWavePlayer? _output;
 
-        public PlaybackRuntime(Guid roomId, Guid audioFileId, int roomVolume, int audioGainDb)
+        private Exception? _outputError;
+
+        public PlaybackRuntime(string deviceId, Guid roomId, Guid audioFileId, int roomVolume, int audioGainDb)
         {
+            DeviceId = deviceId;
             RoomId = roomId;
             AudioFileId = audioFileId;
             RoomVolume = Math.Clamp(roomVolume, 0, 100);
             AudioGainDb = Math.Clamp(audioGainDb, -24, 24);
         }
 
+        public string DeviceId { get; }
         public Guid RoomId { get; }
         public Guid AudioFileId { get; }
+        public Exception? OutputError
+        {
+            get { lock (_sync) return _outputError; }
+        }
         public int RoomVolume { get; private set; }
         public int AudioGainDb { get; private set; }
         public bool SkipRequested { get; private set; }
@@ -735,7 +858,8 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             lock (_sync)
             {
                 SkipRequested = true;
-                _output?.Stop();
+                try { _output?.Stop(); }
+                catch (Exception ex) { _outputError ??= ex; }
             }
         }
 
@@ -754,12 +878,18 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             lock (_sync) EndOfStream = true;
         }
 
+        public void MarkOutputError(Exception exception)
+        {
+            lock (_sync) _outputError ??= exception;
+        }
+
         public void Stop()
         {
             lock (_sync)
             {
                 SkipRequested = true;
-                _output?.Stop();
+                try { _output?.Stop(); }
+                catch (Exception ex) { _outputError ??= ex; }
             }
         }
 

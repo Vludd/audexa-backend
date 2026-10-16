@@ -219,6 +219,55 @@ public sealed class AudioDeviceService : IAudioDeviceService
         return device?.Outputs.Any(output => output.Id == outputId) == true;
     }
 
+    public bool IsDeviceAvailable(string deviceId)
+    {
+        if (!OperatingSystem.IsWindows()) return false;
+
+        // Check membership in the current ACTIVE render endpoint collection.
+        // GetDevice(id).State can report a stale MMDevice as Active after the
+        // endpoint has disappeared from the active collection. The dashboard's
+        // device status is based on enumeration, so playback must use the same
+        // source of truth to avoid a permanent Playing state after unplugging.
+        if (deviceId.StartsWith("wasapi:render:", StringComparison.Ordinal))
+        {
+            var endpointId = deviceId["wasapi:render:".Length..];
+            try
+            {
+                using var enumerator = new MMDeviceEnumerator();
+                var activeEndpoints = enumerator.EnumerateAudioEndPoints(
+                    DataFlow.Render,
+                    DeviceState.Active);
+
+                foreach (var endpoint in activeEndpoints)
+                {
+                    using (endpoint)
+                    {
+                        if (string.Equals(endpoint.ID, endpointId, StringComparison.OrdinalIgnoreCase))
+                            return true;
+                    }
+                }
+
+                return false;
+            }
+            catch
+            {
+                // Fail closed: enumeration failure must never be interpreted as
+                // confirmation that an output is available.
+                return false;
+            }
+        }
+
+        if (deviceId.StartsWith("waveout:", StringComparison.Ordinal))
+        {
+            if (!int.TryParse(deviceId["waveout:".Length..], out var deviceNumber)) return false;
+            return deviceNumber >= 0 && deviceNumber < WaveInterop.waveOutGetNumDevs();
+        }
+
+        // ASIO drivers do not expose a consistent lightweight availability API.
+        // PlaybackStopped exceptions remain the primary signal for ASIO failures.
+        return deviceId.StartsWith("asio:", StringComparison.Ordinal);
+    }
+
     private static (int? SampleRate, int? BufferSize) GetWasapiAudioInfo(MMDevice device)
     {
         try

@@ -7,6 +7,8 @@ public interface IAudioDeviceService
     AudioDeviceDto? FindDevice(string deviceId);
 
     bool HasOutput(string deviceId, string outputId);
+
+    bool IsDeviceAvailable(string deviceId);
 }
 
 public sealed record AudioDevicesResponse(
