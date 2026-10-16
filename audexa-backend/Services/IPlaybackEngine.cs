@@ -11,7 +11,7 @@ public interface IPlaybackEngine
     Task ResumeSessionAsync(Guid sessionId, CancellationToken cancellationToken = default);
     Task<PlaybackStateDto> StartScenarioAsync(Guid scenarioId, CancellationToken cancellationToken = default);
     Task StopAsync(CancellationToken cancellationToken = default);
-    Task SkipStepAsync(Guid roomId, CancellationToken cancellationToken = default);
+    Task SkipStepAsync(Guid sessionId, int stepNumber, CancellationToken cancellationToken = default);
     Task PauseAsync(CancellationToken cancellationToken = default);
     Task ResumeAsync(CancellationToken cancellationToken = default);
     Task SetRoomVolumeAsync(Guid roomId, int volume, CancellationToken cancellationToken = default);

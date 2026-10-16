@@ -67,13 +67,16 @@ public sealed class PlaybackController : ControllerBase
         return Ok(_playback.GetState());
     }
 
-    [HttpPost("steps/{roomId:guid}/skip")]
-    public async Task<ActionResult<PlaybackStateDto>> SkipStep(Guid roomId, CancellationToken cancellationToken)
+    [HttpPost("sessions/{sessionId:guid}/steps/{stepNumber:int}/skip")]
+    public async Task<ActionResult<IReadOnlyList<PlaybackSessionDto>>> SkipStep(
+        Guid sessionId,
+        int stepNumber,
+        CancellationToken cancellationToken)
     {
         try
         {
-            await _playback.SkipStepAsync(roomId, cancellationToken);
-            return Ok(_playback.GetState());
+            await _playback.SkipStepAsync(sessionId, stepNumber, cancellationToken);
+            return Ok(_playback.GetSessions());
         }
         catch (PlaybackException ex)
         {

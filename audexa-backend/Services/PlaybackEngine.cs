@@ -261,19 +261,34 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         return Task.CompletedTask;
     }
 
-    public Task SkipStepAsync(Guid roomId, CancellationToken cancellationToken = default)
+    public Task SkipStepAsync(Guid sessionId, int stepNumber, CancellationToken cancellationToken = default)
     {
-        PlaybackSession? session;
         lock (_sync)
         {
-            session = _roomOwners.TryGetValue(roomId, out var ownerId) && _sessions.TryGetValue(ownerId, out var owner)
-                ? owner
-                : _sessions.Values.FirstOrDefault(x => x.Active?.RoomId == roomId);
-            if (session is null || session.Active is null || session.State.Status is not ("playing" or "waiting" or "paused"))
-                throw new PlaybackException("NO_ACTIVE_STEP", "There is no active playback step to skip in this room.");
-            if (!_devices.IsDeviceAvailable(session.Active.DeviceId))
-                throw new PlaybackException("DEVICE_UNAVAILABLE", "Аудиоустройство отключено или недоступно. Подключите устройство и запустите сценарий повторно.");
-            session.Active.RequestSkip();
+            if (!_sessions.TryGetValue(sessionId, out var session) ||
+                !IsActive(session.State.Status) ||
+                stepNumber < 1 || stepNumber > session.State.TotalSteps ||
+                session.State.CurrentStep != stepNumber)
+            {
+                throw new PlaybackException("NO_ACTIVE_STEP", "The selected scenario step is no longer active.");
+            }
+
+            var step = session.State.Steps.FirstOrDefault(x => x.Step == stepNumber);
+            if (step is null || step.Status is not ("playing" or "paused" or "waiting" or "delaying"))
+                throw new PlaybackException("NO_ACTIVE_STEP", "The selected scenario step is no longer active.");
+
+            // Store the request on the session as well as the runtime. A step may
+            // be waiting to reserve its room and therefore have no runtime yet.
+            session.SkipRequestedStep = stepNumber;
+            if (session.Active is { } active && active.RoomId == step.RoomId)
+                active.RequestSkip();
+
+            // Wake room waiters so a skipped step does not start later when its
+            // room becomes free. The signal is shared, so all waiters re-check
+            // their own session state before proceeding.
+            var previous = _roomChanged;
+            _roomChanged = NewRoomSignal();
+            previous.TrySetResult(true);
         }
         return Task.CompletedTask;
     }
@@ -356,13 +371,21 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
     private static TaskCompletionSource<bool> NewRoomSignal() =>
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    private async Task ReserveRoomAsync(PlaybackSession session, Guid roomId, int stepNumber, CancellationToken token)
+    private async Task<bool> ReserveRoomAsync(PlaybackSession session, Guid roomId, int stepNumber, CancellationToken token)
     {
         while (true)
         {
             token.ThrowIfCancellationRequested();
             bool isPaused;
-            lock (_sync) isPaused = session.PauseRequested;
+            lock (_sync)
+            {
+                if (session.SkipRequestedStep == stepNumber)
+                {
+                    session.SkipRequestedStep = null;
+                    return false;
+                }
+                isPaused = session.PauseRequested;
+            }
             if (isPaused)
             {
                 await Task.Delay(100, token);
@@ -372,10 +395,15 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             Task waitTask;
             lock (_sync)
             {
+                if (session.SkipRequestedStep == stepNumber)
+                {
+                    session.SkipRequestedStep = null;
+                    return false;
+                }
                 if (!_roomOwners.TryGetValue(roomId, out var owner) || owner == session.Id)
                 {
                     _roomOwners[roomId] = session.Id;
-                    return;
+                    return true;
                 }
                 waitTask = _roomChanged.Task;
             }
@@ -419,6 +447,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         public Task? Task { get; set; }
         public PlaybackRuntime? Active { get; set; }
         public bool PauseRequested { get; set; }
+        public int? SkipRequestedStep { get; set; }
         public PlaybackStateDto State { get; set; } = state;
     }
 
@@ -445,7 +474,12 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
 
                     // Reserve the room before applying this step's delay. A step
                     // waiting on another session starts from the beginning once released.
-                    await ReserveRoomAsync(session, step.RoomId, stepNumber, cancellationToken);
+                    var roomReserved = await ReserveRoomAsync(session, step.RoomId, stepNumber, cancellationToken);
+                    if (!roomReserved)
+                    {
+                        SetStepState(stepNumber, "stopped", 0, 0);
+                        continue;
+                    }
 
                     var runtime = new PlaybackRuntime(
                         deviceId,
@@ -462,7 +496,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
                     if (step.DelayMs > 0)
                     {
                         var remaining = step.DelayMs / 1000d;
-                        SetStepState(stepNumber, "waiting", 0, remaining);
+                        SetStepState(stepNumber, "delaying", 0, remaining);
 
                         var delayStart = DateTime.UtcNow;
                         while (remaining > 0)
@@ -476,7 +510,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
 
                             await Task.Delay(100, cancellationToken);
                             remaining = Math.Max(0, step.DelayMs / 1000d - (DateTime.UtcNow - delayStart).TotalSeconds);
-                            SetStepState(stepNumber, "waiting", 0, remaining);
+                            SetStepState(stepNumber, "delaying", 0, remaining);
                         }
 
                         if (runtime.SkipRequested)
@@ -484,6 +518,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
                             lock (_sync)
                             {
                                 if (_active == runtime) _active = null;
+                                if (session.SkipRequestedStep == stepNumber) session.SkipRequestedStep = null;
                             }
                             SetStepState(stepNumber, "stopped", 0, 0);
                             ReleaseRoom(step.RoomId, session.Id);
@@ -509,6 +544,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
                         lock (_sync)
                         {
                             if (_active == runtime) _active = null;
+                            if (session.SkipRequestedStep == stepNumber) session.SkipRequestedStep = null;
                         }
                         SetStepState(stepNumber, "stopped", 0, 0);
                         ReleaseRoom(step.RoomId, session.Id);
@@ -520,6 +556,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
                     lock (_sync)
                     {
                         if (_active == runtime) _active = null;
+                        if (session.SkipRequestedStep == stepNumber) session.SkipRequestedStep = null;
                     }
                     ReleaseRoom(step.RoomId, session.Id);
                 }
@@ -727,7 +764,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
                 DelayRemainingSeconds = delayRemaining
             };
 
-            var next = status is "playing" or "waiting"
+            var next = status is "playing" or "waiting" or "delaying"
                 ? (stepNumber < steps.Count ? stepNumber + 1 : null)
                 : FindNextPending(steps, stepNumber);
 
@@ -735,7 +772,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             {
                 Status = status switch
                 {
-                    "waiting" => "waiting",
+                    "waiting" or "delaying" => "waiting",
                     "playing" => "playing",
                     "paused" => "paused",
                     _ => _state.Status
@@ -759,7 +796,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             var steps = _state.Steps
                 .Select(step => step with
                 {
-                    Status = step.Status is "playing" or "paused" or "waiting"
+                    Status = step.Status is "playing" or "paused" or "waiting" or "delaying"
                         ? "stopped"
                         : step.Status,
                     DelayRemainingSeconds = 0
@@ -817,7 +854,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         return stepStatus switch
         {
             "playing" => "playing",
-            "waiting" => "waiting",
+            "waiting" or "delaying" => "waiting",
             "paused" => "paused",
             "stopped" or "finished" => "stopped",
             "pending" => "idle",
@@ -851,7 +888,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             {
                 var step = steps[i];
 
-                if (status == "idle" && (step.Status is "pending" or "playing" or "waiting"))
+                if (status == "idle" && (step.Status is "pending" or "playing" or "waiting" or "delaying"))
                 {
                     // Reaching the end of the run is a normal completion.
                     steps[i] = step with
@@ -860,7 +897,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
                         DelayRemainingSeconds = 0
                     };
                 }
-                else if (status == "stopped" && (step.Status is "playing" or "paused" or "waiting"))
+                else if (status == "stopped" && (step.Status is "playing" or "paused" or "waiting" or "delaying"))
                 {
                     // A stopped scenario must not leave an active/waiting step
                     // (or its countdown) in the terminal snapshot.
@@ -871,7 +908,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
                     };
                 }
                 else if (status == "error" && step.Step == _state.CurrentStep &&
-                         (step.Status is "playing" or "paused" or "waiting"))
+                         (step.Status is "playing" or "paused" or "waiting" or "delaying"))
                 {
                     steps[i] = step with
                     {
