@@ -37,9 +37,10 @@ public class AppDbContext : DbContext
             .HasForeignKey(x => x.AudioConfigurationId)
             .OnDelete(DeleteBehavior.Cascade);
 
+        // A room can own multiple output channels; a physical output can still
+        // belong to only one room (enforced by the unique output index below).
         modelBuilder.Entity<OutputMapping>()
-            .HasIndex(x => new { x.AudioConfigurationId, x.RoomId })
-            .IsUnique();
+            .HasIndex(x => new { x.AudioConfigurationId, x.RoomId });
 
         modelBuilder.Entity<OutputMapping>()
             .HasIndex(x => new { x.AudioConfigurationId, x.OutputId })

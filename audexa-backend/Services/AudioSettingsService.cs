@@ -41,19 +41,10 @@ public sealed class AudioSettingsService : IAudioSettingsService
         ValidateRequest(request);
 
         var requestedMappings = request.Mappings ?? [];
-        var duplicateRoom = requestedMappings
-            .GroupBy(x => x.RoomId)
-            .FirstOrDefault(group => group.Count() > 1);
-
-        if (duplicateRoom is not null)
-        {
-            throw new AudioSettingsValidationException(
-                "DUPLICATE_ROOM_MAPPING",
-                $"Room '{duplicateRoom.Key}' has more than one output mapping.");
-        }
-
         var mappings = requestedMappings
             .Where(x => x.OutputId is not null)
+            .GroupBy(x => new { x.RoomId, x.OutputId })
+            .Select(x => x.First())
             .ToList();
 
         var outputIds = mappings
@@ -79,7 +70,7 @@ public sealed class AudioSettingsService : IAudioSettingsService
                 $"Output '{duplicateOutput.Key}' is assigned to more than one room.");
         }
 
-        var mappingsToPersist = requestedMappings;
+        var mappingsToPersist = mappings;
         var translationOutputToPersist = request.TranslationOutputId;
 
         if (request.DeviceId is not null)
@@ -253,6 +244,7 @@ public sealed class AudioSettingsService : IAudioSettingsService
             configuration.DeviceId,
             configuration.Mappings
                 .OrderBy(x => x.RoomId)
+                .ThenBy(x => x.OutputId)
                 .Select(x => new AudioOutputMappingDto(x.RoomId, x.OutputId))
                 .ToList(),
             configuration.TranslationOutputId);

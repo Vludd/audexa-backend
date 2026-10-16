@@ -57,15 +57,21 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         if (device is null || !string.Equals(device.Status, "online", StringComparison.OrdinalIgnoreCase))
             throw new PlaybackException("DEVICE_UNAVAILABLE", "Configured audio device is unavailable.");
 
-        var mappings = settings.Mappings.ToDictionary(x => x.RoomId, x => x.OutputId);
+        var mappings = settings.Mappings
+            .Where(x => !string.IsNullOrWhiteSpace(x.OutputId))
+            .GroupBy(x => x.RoomId)
+            .ToDictionary(x => x.Key, x => x.Select(y => y.OutputId).Distinct(StringComparer.Ordinal).ToList());
         var steps = scenario.Steps.OrderBy(x => x.Order).ToList();
 
         foreach (var step in steps)
         {
-            if (!mappings.TryGetValue(step.RoomId, out var outputId) || string.IsNullOrWhiteSpace(outputId))
+            if (!mappings.TryGetValue(step.RoomId, out var outputIds) || outputIds.Count == 0)
                 throw new PlaybackException("OUTPUT_NOT_MAPPED", $"Room '{step.Room.Name}' has no audio output mapping.");
-            if (!_devices.HasOutput(settings.DeviceId, outputId))
-                throw new PlaybackException("OUTPUT_UNAVAILABLE", $"Output '{outputId}' is not available.");
+            foreach (var outputId in outputIds)
+            {
+                if (!_devices.HasOutput(settings.DeviceId, outputId))
+                    throw new PlaybackException("OUTPUT_UNAVAILABLE", $"Output '{outputId}' is not available.");
+            }
 
             var path = GetAudioPath(step.AudioFile.StorageFileName);
             if (!File.Exists(path))
@@ -94,7 +100,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             0,
             0,
             Math.Max(0.001, step.AudioFile.Duration.TotalSeconds),
-            mappings[step.RoomId],
+            string.Join(",", mappings[step.RoomId]),
             null)).ToList();
 
         lock (_sync)
@@ -242,7 +248,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
     private async Task RunScenarioAsync(
         Scenario scenario,
         string deviceId,
-        Dictionary<Guid, string> mappings,
+        Dictionary<Guid, List<string>> mappings,
         CancellationToken cancellationToken)
     {
         try
@@ -357,7 +363,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
 
     private async Task PlayFileAsync(
         string deviceId,
-        string outputId,
+        IReadOnlyList<string> outputIds,
         AudioFile audio,
         Scenario scenario,
         ScenarioStep step,
@@ -371,12 +377,15 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
 
         var path = GetAudioPath(audio.StorageFileName);
         using var source = OpenSource(path);
-        using var output = CreateOutput(deviceId, outputId, out var targetFormat, out var targetChannel);
+        var channels = outputIds.Select(ParseOutputIndex).Distinct().ToArray();
+        if (channels.Length == 0)
+            throw new PlaybackException("OUTPUT_NOT_MAPPED", "No audio output is assigned to this room.");
+        using var output = CreateOutput(deviceId, channels, out var targetFormat);
 
         using var provider = new RoutedWaveProvider(
             source,
             targetFormat,
-            targetChannel,
+            channels,
             runtime);
 
         runtime.Attach(output, provider);
@@ -748,15 +757,15 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         };
     }
 
-    private static IWavePlayer CreateOutput(string deviceId, string outputId, out WaveFormat targetFormat, out int targetChannel)
+    private static IWavePlayer CreateOutput(string deviceId, IReadOnlyCollection<int> targetChannels, out WaveFormat targetFormat)
     {
-        targetChannel = ParseOutputIndex(outputId);
+        var maxChannel = targetChannels.Max();
 
         if (deviceId.StartsWith("asio:", StringComparison.Ordinal))
         {
             var driverName = deviceId[5..];
             using var probe = new AsioOut(driverName);
-            var channels = Math.Max(probe.DriverOutputChannelCount, targetChannel + 1);
+            var channels = Math.Max(probe.DriverOutputChannelCount, maxChannel + 1);
             targetFormat = WaveFormat.CreateIeeeFloatWaveFormat(48000, channels);
             return new AsioOut(driverName);
         }
@@ -768,13 +777,15 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             var endpoint = enumerator.GetDevice(endpointId);
             var mixFormat = endpoint.AudioClient.MixFormat;
             targetFormat = new WaveFormat(mixFormat.SampleRate, 16, mixFormat.Channels);
+            if (maxChannel >= mixFormat.Channels)
+                throw new PlaybackException("OUTPUT_CHANNEL_OUT_OF_RANGE", $"Requested output channel {maxChannel + 1} is outside the endpoint's {mixFormat.Channels} channels.");
             return new WasapiOut(endpoint, AudioClientShareMode.Shared, true, 100);
         }
 
         if (deviceId.StartsWith("waveout:", StringComparison.Ordinal) &&
             int.TryParse(deviceId["waveout:".Length..], NumberStyles.Integer, CultureInfo.InvariantCulture, out var deviceNumber))
         {
-            targetFormat = new WaveFormat(48000, 16, Math.Max(2, targetChannel + 1));
+            targetFormat = new WaveFormat(48000, 16, Math.Max(2, maxChannel + 1));
             return new WaveOutEvent { DeviceNumber = deviceNumber, DesiredLatency = 100 };
         }
 
@@ -906,16 +917,16 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
     {
         private readonly WaveStream _source;
         private readonly WaveFormat _target;
-        private readonly int _channel;
+        private readonly int[] _channels;
         private readonly PlaybackRuntime _runtime;
         private readonly MediaFoundationResampler? _resampler;
         private readonly IWaveProvider _input;
 
-        public RoutedWaveProvider(WaveStream source, WaveFormat target, int channel, PlaybackRuntime runtime)
+        public RoutedWaveProvider(WaveStream source, WaveFormat target, IReadOnlyCollection<int> channels, PlaybackRuntime runtime)
         {
             _source = source;
             _target = target;
-            _channel = Math.Clamp(channel, 0, Math.Max(0, target.Channels - 1));
+            _channels = channels.Distinct().Select(channel => Math.Clamp(channel, 0, Math.Max(0, target.Channels - 1))).ToArray();
             _runtime = runtime;
 
             if (source.WaveFormat.SampleRate != target.SampleRate || source.WaveFormat.Channels != 1 || source.WaveFormat.BitsPerSample != 16)
@@ -954,16 +965,19 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             for (var frame = 0; frame < sourceFrames; frame++)
             {
                 var sample = BitConverter.ToInt16(sourceBuffer, frame * 2) / 32768f * (float)gain;
-                var sampleOffset = offset + frame * bytesPerFrame + _channel * (_target.BitsPerSample / 8);
+                foreach (var channel in _channels)
+                {
+                    var sampleOffset = offset + frame * bytesPerFrame + channel * (_target.BitsPerSample / 8);
 
-                if (_target.Encoding == WaveFormatEncoding.IeeeFloat && _target.BitsPerSample == 32)
-                    BitConverter.TryWriteBytes(buffer.AsSpan(sampleOffset, 4), sample);
-                else if (_target.Encoding == WaveFormatEncoding.Pcm && _target.BitsPerSample == 16)
-                    BitConverter.TryWriteBytes(buffer.AsSpan(sampleOffset, 2), (short)Math.Clamp(sample * short.MaxValue, short.MinValue, short.MaxValue));
-                else if (_target.Encoding == WaveFormatEncoding.Pcm && _target.BitsPerSample == 32)
-                    BitConverter.TryWriteBytes(buffer.AsSpan(sampleOffset, 4), (int)Math.Clamp(sample * int.MaxValue, int.MinValue, int.MaxValue));
-                else
-                    throw new PlaybackException("UNSUPPORTED_FORMAT", $"Unsupported target format {_target}");
+                    if (_target.Encoding == WaveFormatEncoding.IeeeFloat && _target.BitsPerSample == 32)
+                        BitConverter.TryWriteBytes(buffer.AsSpan(sampleOffset, 4), sample);
+                    else if (_target.Encoding == WaveFormatEncoding.Pcm && _target.BitsPerSample == 16)
+                        BitConverter.TryWriteBytes(buffer.AsSpan(sampleOffset, 2), (short)Math.Clamp(sample * short.MaxValue, short.MinValue, short.MaxValue));
+                    else if (_target.Encoding == WaveFormatEncoding.Pcm && _target.BitsPerSample == 32)
+                        BitConverter.TryWriteBytes(buffer.AsSpan(sampleOffset, 4), (int)Math.Clamp(sample * int.MaxValue, int.MinValue, int.MaxValue));
+                    else
+                        throw new PlaybackException("UNSUPPORTED_FORMAT", $"Unsupported target format {_target}");
+                }
             }
 
             return bytesWritten;

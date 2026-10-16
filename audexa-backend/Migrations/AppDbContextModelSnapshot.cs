@@ -153,8 +153,7 @@ namespace audexa_backend.Migrations
                     b.HasIndex("AudioConfigurationId", "OutputId")
                         .IsUnique();
 
-                    b.HasIndex("AudioConfigurationId", "RoomId")
-                        .IsUnique();
+                    b.HasIndex("AudioConfigurationId", "RoomId");
 
                     b.ToTable("OutputMappings");
                 });
