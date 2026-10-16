@@ -12,10 +12,12 @@ public sealed class ScenarioService
     private static readonly string[] ValidRepeats = ["once", "loop"];
 
     private readonly AppDbContext _db;
+    private readonly IAudioDeviceService _audioDevices;
 
-    public ScenarioService(AppDbContext db)
+    public ScenarioService(AppDbContext db, IAudioDeviceService audioDevices)
     {
         _db = db;
+        _audioDevices = audioDevices;
     }
 
     public async Task<IReadOnlyList<ScenarioDto>> GetAllAsync(
@@ -229,6 +231,9 @@ public sealed class ScenarioService
         var scenario = await _db.Scenarios
             .AsNoTracking()
             .Include(x => x.Steps)
+                .ThenInclude(x => x.Room)
+            .Include(x => x.Steps)
+                .ThenInclude(x => x.AudioFile)
             .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
 
         if (scenario is null)
@@ -248,64 +253,92 @@ public sealed class ScenarioService
             scenario.StopPrevious,
             errors);
 
-        if (scenario.Steps.Count == 0)
+        var steps = scenario.Steps.OrderBy(x => x.Order).ToList();
+        if (steps.Count == 0)
         {
             errors.Add("Scenario must contain at least one step.");
         }
 
-        var roomIds = scenario.Steps
-            .Select(x => x.RoomId)
-            .Distinct()
-            .ToList();
+        var settings = await _db.AudioConfigurations
+            .AsNoTracking()
+            .Include(x => x.Mappings)
+            .SingleOrDefaultAsync(cancellationToken);
 
-        var audioIds = scenario.Steps
-            .Select(x => x.AudioFileId)
-            .Distinct()
-            .ToList();
+        AudioDeviceDto? device = null;
+        if (string.IsNullOrWhiteSpace(settings?.DeviceId))
+        {
+            errors.Add("No audio device is configured.");
+        }
+        else
+        {
+            device = _audioDevices.FindDevice(settings.DeviceId);
+            if (device is null || !string.Equals(device.Status, "online", StringComparison.OrdinalIgnoreCase))
+            {
+                errors.Add("The configured audio device is unavailable.");
+            }
+        }
 
-        var existingRoomIds = await _db.Rooms
-            .Where(x => roomIds.Contains(x.Id))
-            .Select(x => x.Id)
-            .ToListAsync(cancellationToken);
+        var mappings = (settings?.Mappings ?? [])
+            .Where(x => !string.IsNullOrWhiteSpace(x.OutputId))
+            .GroupBy(x => x.RoomId)
+            .ToDictionary(
+                x => x.Key,
+                x => x.Select(y => y.OutputId!).Distinct(StringComparer.Ordinal).ToList());
 
-        var existingAudioIds = await _db.AudioFiles
-            .Where(x => audioIds.Contains(x.Id))
-            .Select(x => x.Id)
-            .ToListAsync(cancellationToken);
-
-        foreach (var step in scenario.Steps.OrderBy(x => x.Order))
+        foreach (var step in steps)
         {
             var number = step.Order + 1;
 
-            if (!existingRoomIds.Contains(step.RoomId))
+            if (step.Room is null)
             {
-                errors.Add(
-                    $"Step {number}: room '{step.RoomId}' was not found.");
+                errors.Add($"Step {number}: room '{step.RoomId}' was not found.");
+            }
+            else if (!mappings.TryGetValue(step.RoomId, out var outputIds) || outputIds.Count == 0)
+            {
+                errors.Add($"Step {number}: room '{step.Room.Name}' has no audio output mapping.");
+            }
+            else if (device is not null && string.Equals(device.Status, "online", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (var outputId in outputIds)
+                {
+                    if (!_audioDevices.HasOutput(settings!.DeviceId!, outputId))
+                    {
+                        errors.Add($"Step {number}: output '{outputId}' is not available on the configured audio device.");
+                    }
+                }
             }
 
-            if (!existingAudioIds.Contains(step.AudioFileId))
+            if (step.AudioFile is null)
             {
-                errors.Add(
-                    $"Step {number}: audio file '{step.AudioFileId}' was not found.");
+                errors.Add($"Step {number}: audio file '{step.AudioFileId}' was not found.");
+            }
+            else
+            {
+                var path = GetAudioPath(step.AudioFile.StorageFileName);
+                if (!File.Exists(path))
+                {
+                    errors.Add($"Step {number}: audio file '{step.AudioFile.FileName}' is missing from storage.");
+                }
+
+                if (step.AudioFile.Duration <= TimeSpan.Zero)
+                {
+                    warnings.Add($"Step {number}: audio file '{step.AudioFile.FileName}' has no valid duration metadata.");
+                }
             }
 
             if (step.DelayMs < 0)
             {
-                errors.Add(
-                    $"Step {number}: delay cannot be negative.");
+                errors.Add($"Step {number}: delay cannot be negative.");
             }
         }
 
-        if (scenario.Status == "active" && scenario.Steps.Count == 0)
-        {
-            errors.Add(
-                "An active scenario cannot have zero steps.");
-        }
+        return new ScenarioValidationDto(errors.Count == 0, errors, warnings);
+    }
 
-        return new ScenarioValidationDto(
-            errors.Count == 0,
-            errors,
-            warnings);
+    private static string GetAudioPath(string storageFileName)
+    {
+        var appDataPath = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        return Path.Combine(appDataPath, "Audexa", "Audio", storageFileName);
     }
 
     private async Task ValidateStepsAsync(

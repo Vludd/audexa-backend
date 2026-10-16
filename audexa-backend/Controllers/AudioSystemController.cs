@@ -37,7 +37,8 @@ public sealed class AudioSystemController : ControllerBase
         {
             "starting" => "starting",
             "playing" or "paused" or "waiting" => "running",
-            "error" => "error",
+            // Terminal playback failures remain available in session history.
+            // The engine itself is stopped once the failed session has unwound.
             _ => "stopped"
         };
 
@@ -70,12 +71,14 @@ public sealed class AudioSystemController : ControllerBase
         // whether the operator has created room/scenario content.
         var allRoomsMapped = roomIds.Count == 0 || roomIds.All(mappedRoomIds.Contains);
         var mappingsValid = allRoomsMapped && !duplicateOutputs;
-        var healthy = mappingsValid && engineStatus != "error";
-        var state = engineStatus == "error" ? "error" : healthy ? "ready" : "degraded";
+        // Hardware health and the last playback result are different concerns.
+        // A scenario that failed because a device was unplugged leaves the playback
+        // engine in its terminal error state, but that must not keep the Header in
+        // an error state after the device has been reconnected.
+        var state = mappingsValid ? "ready" : "degraded";
         string? error = null;
         if (duplicateOutputs) error = "Один или несколько аудиовыходов назначены нескольким комнатам";
         else if (roomIds.Count > 0 && !mappingsValid) error = $"Корректно сопоставлено комнат: {mappedRoomIds.Count} из {roomIds.Count}";
-        else if (engineStatus == "error") error = playback.Error ?? "Ошибка движка воспроизведения";
 
         return Ok(new SystemStatusDto(state, "online", device.Name, device.Id, true, device.OutputCount,
             device.Outputs.Count, mappedRoomIds.Count, roomIds.Count, device.SampleRate,

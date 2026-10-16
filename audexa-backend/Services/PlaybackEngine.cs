@@ -74,6 +74,8 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
 
         if (scenario is null)
             throw new PlaybackException("SCENARIO_NOT_FOUND", "Scenario was not found.");
+        if (!string.Equals(scenario.Status, "active", StringComparison.OrdinalIgnoreCase))
+            throw new PlaybackException("SCENARIO_INACTIVE", "Scenario is inactive. Activate it before starting playback.");
         if (scenario.Steps.Count == 0)
             throw new PlaybackException("SCENARIO_EMPTY", "Scenario has no steps.");
 
