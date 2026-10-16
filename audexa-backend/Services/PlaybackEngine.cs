@@ -13,6 +13,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IAudioDeviceService _devices;
+    private readonly ILogger<PlaybackEngine> _logger;
     private readonly object _sync = new();
 
     private readonly Dictionary<Guid, PlaybackSession> _sessions = [];
@@ -33,10 +34,11 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         set { if (_currentSession.Value is { } session) session.State = value; else _legacyState = value; }
     }
 
-    public PlaybackEngine(IServiceScopeFactory scopeFactory, IAudioDeviceService devices)
+    public PlaybackEngine(IServiceScopeFactory scopeFactory, IAudioDeviceService devices, ILogger<PlaybackEngine> logger)
     {
         _scopeFactory = scopeFactory;
         _devices = devices;
+        _logger = logger;
     }
 
     public PlaybackStateDto GetState()
@@ -146,6 +148,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             PruneCompletedSessions();
             _sessions.Add(sessionId, session);
         }
+        _logger.LogInformation(new EventId(7001, "scenario.started"), "Scenario started. ScenarioId={ScenarioId}; ScenarioName={ScenarioName}; SessionId={SessionId}; StepCount={StepCount}; DeviceId={DeviceId}", scenario.Id, scenario.Name, sessionId, steps.Count, settings.DeviceId);
         var previous = _currentSession.Value;
         _currentSession.Value = session;
         try
@@ -166,6 +169,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         // room while stopping session A could let waiting session B start briefly.
         foreach (var session in sessions)
         {
+            _logger.LogInformation(new EventId(7002, "playback.stop_all_requested"), "Stop all requested. SessionId={SessionId}; ScenarioId={ScenarioId}; ScenarioName={ScenarioName}", session.Id, session.State.ScenarioId, session.State.ScenarioName);
             try { session.Cts.Cancel(); }
             catch (ObjectDisposedException) { }
             lock (_sync) session.Active?.Stop();
@@ -199,6 +203,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         try
         {
             if (!IsActive(session.State.Status)) return;
+            _logger.LogInformation(new EventId(7003, "scenario.stopped"), "Scenario stop requested. SessionId={SessionId}; ScenarioId={ScenarioId}; ScenarioName={ScenarioName}", session.Id, session.State.ScenarioId, session.State.ScenarioName);
             session.Cts.Cancel();
             lock (_sync) session.Active?.Stop();
             if (session.Task is not null)
@@ -280,6 +285,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             // Store the request on the session as well as the runtime. A step may
             // be waiting to reserve its room and therefore have no runtime yet.
             session.SkipRequestedStep = stepNumber;
+            _logger.LogInformation(new EventId(7004, "scenario.step_skipped"), "Scenario step skip requested. SessionId={SessionId}; ScenarioId={ScenarioId}; StepNumber={StepNumber}", sessionId, session.State.ScenarioId, stepNumber);
             if (session.Active is { } active && active.RoomId == step.RoomId)
                 active.RequestSkip();
 
@@ -563,14 +569,18 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             } while (string.Equals(scenario.Repeat, "loop", StringComparison.OrdinalIgnoreCase));
 
             SetStateTerminal("idle", scenario);
+            _logger.LogInformation(new EventId(7005, "scenario.completed"), "Scenario completed. ScenarioId={ScenarioId}; ScenarioName={ScenarioName}; SessionId={SessionId}", scenario.Id, scenario.Name, session.Id);
         }
         catch (OperationCanceledException)
         {
             SetStateTerminal("stopped", scenario);
+            _logger.LogInformation(new EventId(7006, "scenario.cancelled"), "Scenario cancelled or stopped. ScenarioId={ScenarioId}; ScenarioName={ScenarioName}; SessionId={SessionId}", scenario.Id, scenario.Name, session.Id);
         }
         catch (Exception ex)
         {
             SetStateTerminal("error", scenario, GetFriendlyPlaybackError(ex));
+            var code = ex is PlaybackException playbackException ? playbackException.Code : "UNEXPECTED_PLAYBACK_ERROR";
+            _logger.LogError(new EventId(7007, "playback.error"), ex, "Scenario playback failed. ErrorCode={ErrorCode}; ScenarioId={ScenarioId}; ScenarioName={ScenarioName}; SessionId={SessionId}; Message={Message}", code, scenario.Id, scenario.Name, session.Id, ex.Message);
         }
         finally
         {

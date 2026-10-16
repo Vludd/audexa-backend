@@ -1,6 +1,7 @@
 using audexa_backend.Data;
 using audexa_backend.Services;
 using Microsoft.EntityFrameworkCore;
+using audexa_backend.Logging;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -12,8 +13,15 @@ var appDataPath = Environment.GetFolderPath(
 var audexaDataPath = Path.Combine(appDataPath, "Audexa");
 
 Directory.CreateDirectory(audexaDataPath);
+var logDirectory = Path.Combine(audexaDataPath, "Logs");
+Directory.CreateDirectory(logDirectory);
 
 var databasePath = Path.Combine(audexaDataPath, "audexa.db");
+
+// Persistent operational logs (daily JSONL files, 5 MB per file, 14-day retention).
+var fileLoggerProvider = new JsonFileLoggerProvider(logDirectory);
+builder.Logging.AddProvider(fileLoggerProvider);
+builder.Services.AddSingleton(fileLoggerProvider);
 
 // Services
 

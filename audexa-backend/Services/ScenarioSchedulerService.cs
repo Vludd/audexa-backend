@@ -27,7 +27,7 @@ public sealed class ScenarioSchedulerService : BackgroundService
         {
             try { await TickAsync(stoppingToken); }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
-            catch (Exception ex) { _logger.LogError(ex, "Audexa scheduler tick failed."); }
+            catch (Exception ex) { _logger.LogError(new EventId(7101, "schedule.tick_failed"), ex, "Scheduler tick failed. ErrorType={ErrorType}", ex.GetType().Name); }
         }
     }
 
@@ -64,11 +64,11 @@ public sealed class ScenarioSchedulerService : BackgroundService
             try
             {
                 await _playback.StartScenarioAsync(schedule.ScenarioId, cancellationToken);
-                _logger.LogInformation("Schedule {ScheduleId} started scenario {ScenarioId}.", schedule.Id, schedule.ScenarioId);
+                _logger.LogInformation(new EventId(7102, "schedule.execution_started"), "Schedule execution started. ScheduleId={ScheduleId}; ScenarioId={ScenarioId}", schedule.Id, schedule.ScenarioId);
             }
             catch (PlaybackException ex)
             {
-                _logger.LogError(ex, "Schedule {ScheduleId} failed to start scenario {ScenarioId}: {Message}", schedule.Id, schedule.ScenarioId, ex.Message);
+                _logger.LogError(new EventId(7103, "schedule.execution_failed"), ex, "Schedule execution failed. ScheduleId={ScheduleId}; ScenarioId={ScenarioId}; ErrorCode={ErrorCode}; Message={Message}", schedule.Id, schedule.ScenarioId, ex.Code, ex.Message);
             }
         }
     }
