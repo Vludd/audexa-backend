@@ -15,6 +15,30 @@ public sealed class PlaybackController : ControllerBase
     [HttpGet]
     public ActionResult<PlaybackStateDto> GetState() => Ok(_playback.GetState());
 
+    [HttpGet("sessions")]
+    public ActionResult<IReadOnlyList<PlaybackSessionDto>> GetSessions() => Ok(_playback.GetSessions());
+
+    [HttpPost("sessions/{sessionId:guid}/pause")]
+    public async Task<IActionResult> PauseSession(Guid sessionId, CancellationToken cancellationToken)
+    {
+        try { await _playback.PauseSessionAsync(sessionId, cancellationToken); return Ok(_playback.GetSessions()); }
+        catch (PlaybackException ex) { return BadRequest(new { code = ex.Code, message = ex.Message }); }
+    }
+
+    [HttpPost("sessions/{sessionId:guid}/resume")]
+    public async Task<IActionResult> ResumeSession(Guid sessionId, CancellationToken cancellationToken)
+    {
+        try { await _playback.ResumeSessionAsync(sessionId, cancellationToken); return Ok(_playback.GetSessions()); }
+        catch (PlaybackException ex) { return BadRequest(new { code = ex.Code, message = ex.Message }); }
+    }
+
+    [HttpPost("sessions/{sessionId:guid}/stop")]
+    public async Task<IActionResult> StopSession(Guid sessionId, CancellationToken cancellationToken)
+    {
+        try { await _playback.StopSessionAsync(sessionId, cancellationToken); return Ok(_playback.GetSessions()); }
+        catch (PlaybackException ex) { return BadRequest(new { code = ex.Code, message = ex.Message }); }
+    }
+
     [HttpPost("scenarios/{id:guid}/start")]
     public async Task<ActionResult<PlaybackStateDto>> StartScenario(Guid id, CancellationToken cancellationToken)
     {

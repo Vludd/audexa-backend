@@ -46,3 +46,5 @@ public sealed record PlaybackStateDto(
     string? Error);
 
 public sealed record PlaybackVolumeRequest(int Value);
+
+public sealed record PlaybackSessionDto(Guid SessionId, PlaybackStateDto State);

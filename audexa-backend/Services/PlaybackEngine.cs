@@ -15,10 +15,23 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
     private readonly IAudioDeviceService _devices;
     private readonly object _sync = new();
 
-    private CancellationTokenSource? _runCts;
-    private Task? _runTask;
-    private PlaybackRuntime? _active;
-    private PlaybackStateDto _state = new("idle", null, null, 0, null, 0, null, null, [], [], null);
+    private readonly Dictionary<Guid, PlaybackSession> _sessions = [];
+    private readonly Dictionary<Guid, Guid> _roomOwners = [];
+    private TaskCompletionSource<bool> _roomChanged = NewRoomSignal();
+    private readonly AsyncLocal<PlaybackSession?> _currentSession = new();
+    private PlaybackStateDto _legacyState = new("idle", null, null, 0, null, 0, null, null, [], [], null);
+
+    // Existing playback helpers operate on the session flowing through AsyncLocal.
+    private PlaybackRuntime? _active
+    {
+        get => _currentSession.Value?.Active;
+        set { if (_currentSession.Value is { } session) session.Active = value; }
+    }
+    private PlaybackStateDto _state
+    {
+        get => _currentSession.Value?.State ?? _legacyState;
+        set { if (_currentSession.Value is { } session) session.State = value; else _legacyState = value; }
+    }
 
     public PlaybackEngine(IServiceScopeFactory scopeFactory, IAudioDeviceService devices)
     {
@@ -28,7 +41,23 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
 
     public PlaybackStateDto GetState()
     {
-        lock (_sync) return _state;
+        lock (_sync)
+        {
+            var preferred = _sessions.Values
+                .OrderByDescending(x => IsActive(x.State.Status))
+                .ThenByDescending(x => x.State.StartedAt)
+                .FirstOrDefault();
+            return preferred?.State ?? _legacyState;
+        }
+    }
+
+    public IReadOnlyList<PlaybackSessionDto> GetSessions()
+    {
+        lock (_sync)
+            return _sessions.Values
+                .OrderByDescending(x => x.State.StartedAt)
+                .Select(x => new PlaybackSessionDto(x.Id, x.State))
+                .ToList();
     }
 
     public async Task<PlaybackStateDto> StartScenarioAsync(Guid scenarioId, CancellationToken cancellationToken = default)
@@ -78,17 +107,13 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
                 throw new PlaybackException("AUDIO_FILE_MISSING", $"Audio file '{step.AudioFile.FileName}' is missing.");
         }
 
-        // Validate the requested scenario before touching an existing playback.
-        // This prevents an invalid scenario request from stopping a valid run.
-        var currentStatus = GetState().Status;
-        var hasActivePlayback = currentStatus is "starting" or "playing" or "paused" or "waiting";
-        if (hasActivePlayback && !scenario.StopPrevious)
-            throw new PlaybackException("PLAYBACK_ALREADY_ACTIVE", "Another scenario is already running. Parallel scenario playback is not supported, and this scenario is configured not to stop the active one.");
-
-        if (hasActivePlayback)
+        // StopPrevious retains its original meaning: when enabled, this scenario
+        // replaces all active sessions. Otherwise it may run alongside them.
+        if (scenario.StopPrevious && HasActiveSessions())
             await StopAsync(cancellationToken);
 
         var cts = new CancellationTokenSource();
+        var sessionId = Guid.NewGuid();
         var stepStates = steps.Select((step, index) => new PlaybackStepStateDto(
             index + 1,
             step.RoomId,
@@ -103,108 +128,175 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             string.Join(",", mappings[step.RoomId]),
             null)).ToList();
 
+        var session = new PlaybackSession(sessionId, cts, new PlaybackStateDto(
+            "starting",
+            scenario.Id,
+            scenario.Name,
+            0,
+            steps.Count > 0 ? 1 : null,
+            steps.Count,
+            DateTime.UtcNow,
+            null,
+            [],
+            stepStates,
+            null));
+
         lock (_sync)
         {
-            _runCts = cts;
-            _state = new PlaybackStateDto(
-                "starting",
-                scenario.Id,
-                scenario.Name,
-                0,
-                steps.Count > 0 ? 1 : null,
-                steps.Count,
-                DateTime.UtcNow,
-                null,
-                [],
-                stepStates,
-                null);
+            PruneCompletedSessions();
+            _sessions.Add(sessionId, session);
         }
+        var previous = _currentSession.Value;
+        _currentSession.Value = session;
+        try
+        {
+            session.Task = Task.Run(() => RunScenarioAsync(scenario, settings.DeviceId, mappings, cts.Token), CancellationToken.None);
+        }
+        finally { _currentSession.Value = previous; }
 
-        _runTask = Task.Run(() => RunScenarioAsync(scenario, settings.DeviceId, mappings, cts.Token), CancellationToken.None);
-        return GetState();
+        return session.State;
     }
 
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
-        CancellationTokenSource? cts;
-        Task? task;
+        PlaybackSession[] sessions;
+        lock (_sync) sessions = _sessions.Values.Where(x => IsActive(x.State.Status)).ToArray();
 
+        // Cancel every session before awaiting any worker. Otherwise releasing a
+        // room while stopping session A could let waiting session B start briefly.
+        foreach (var session in sessions)
+        {
+            try { session.Cts.Cancel(); }
+            catch (ObjectDisposedException) { }
+            lock (_sync) session.Active?.Stop();
+        }
+
+        foreach (var session in sessions)
+        {
+            var previous = _currentSession.Value;
+            _currentSession.Value = session;
+            try
+            {
+                if (session.Task is not null)
+                {
+                    try { await session.Task; }
+                    catch (OperationCanceledException) { }
+                }
+                NormalizeStoppedSteps();
+            }
+            finally { _currentSession.Value = previous; }
+        }
+    }
+
+    public async Task StopSessionAsync(Guid sessionId, CancellationToken cancellationToken = default)
+    {
+        PlaybackSession? session;
+        lock (_sync) _sessions.TryGetValue(sessionId, out session);
+        if (session is null) throw new PlaybackException("SESSION_NOT_FOUND", "Playback session was not found.");
+
+        var previous = _currentSession.Value;
+        _currentSession.Value = session;
+        try
+        {
+            if (!IsActive(session.State.Status)) return;
+            session.Cts.Cancel();
+            lock (_sync) session.Active?.Stop();
+            if (session.Task is not null)
+            {
+                try { await session.Task; }
+                catch (OperationCanceledException) { }
+            }
+            NormalizeStoppedSteps();
+        }
+        finally { _currentSession.Value = previous; }
+    }
+
+    public Task PauseSessionAsync(Guid sessionId, CancellationToken cancellationToken = default) => ChangeSessionPauseAsync(sessionId, true);
+    public Task ResumeSessionAsync(Guid sessionId, CancellationToken cancellationToken = default) => ChangeSessionPauseAsync(sessionId, false);
+
+    private Task ChangeSessionPauseAsync(Guid sessionId, bool pause)
+    {
+        PlaybackSession? session;
+        lock (_sync) _sessions.TryGetValue(sessionId, out session);
+        if (session is null) throw new PlaybackException("SESSION_NOT_FOUND", "Playback session was not found.");
         lock (_sync)
         {
-            cts = _runCts;
-            task = _runTask;
+            if (pause)
+            {
+                if (session.State.Status == "playing" && session.Active is not null)
+                {
+                    session.Active.Pause();
+                    session.State = session.State with { Status = "paused" };
+                    return Task.CompletedTask;
+                }
+
+                // A session waiting for a room can be paused without acquiring
+                // the room. It keeps waiting and resumes when explicitly asked.
+                if (session.State.Status == "waiting" && session.Active is null)
+                {
+                    session.PauseRequested = true;
+                    var steps = session.State.Steps.ToList();
+                    var index = steps.FindIndex(x => x.Step == session.State.CurrentStep);
+                    if (index >= 0) steps[index] = steps[index] with { Status = "paused" };
+                    session.State = session.State with { Status = "paused", Steps = steps };
+                }
+                return Task.CompletedTask;
+            }
+
+            if (session.State.Status != "paused") return Task.CompletedTask;
+            if (session.Active is not null)
+            {
+                session.Active.Resume();
+                session.State = session.State with { Status = "playing" };
+            }
+            else
+            {
+                session.PauseRequested = false;
+                var steps = session.State.Steps.ToList();
+                var index = steps.FindIndex(x => x.Step == session.State.CurrentStep);
+                if (index >= 0) steps[index] = steps[index] with { Status = "waiting" };
+                session.State = session.State with { Status = "waiting", Steps = steps };
+            }
         }
-
-        if (cts is null)
-        {
-            NormalizeStoppedSteps();
-            return;
-        }
-
-        cts.Cancel();
-        lock (_sync) _active?.Stop();
-
-        if (task is not null)
-        {
-            // Once a stop has been requested, wait for the playback worker to
-            // finish its cancellation path. Returning on the HTTP request token
-            // could expose an intermediate snapshot before terminal cleanup.
-            try { await task; }
-            catch (OperationCanceledException) { }
-        }
-
-        // Keep the API snapshot consistent even if a late state update raced
-        // with the worker's terminal transition. The worker is complete here.
-        NormalizeStoppedSteps();
+        return Task.CompletedTask;
     }
 
     public Task SkipStepAsync(Guid roomId, CancellationToken cancellationToken = default)
     {
+        PlaybackSession? session;
         lock (_sync)
         {
-            if (_active is null || _state.Status is not ("playing" or "waiting" or "paused"))
-                throw new PlaybackException("NO_ACTIVE_STEP", "There is no active playback step to skip.");
-
-            if (_active.RoomId != roomId)
-                throw new PlaybackException("ACTIVE_STEP_CHANGED", "The active step has changed. Refresh playback state and try again.");
-
-            if (!_devices.IsDeviceAvailable(_active.DeviceId))
-                throw new PlaybackException(
-                    "DEVICE_UNAVAILABLE",
-                    "Аудиоустройство отключено или недоступно. Подключите устройство и запустите сценарий повторно.");
-
-            _active.RequestSkip();
+            session = _roomOwners.TryGetValue(roomId, out var ownerId) && _sessions.TryGetValue(ownerId, out var owner)
+                ? owner
+                : _sessions.Values.FirstOrDefault(x => x.Active?.RoomId == roomId);
+            if (session is null || session.Active is null || session.State.Status is not ("playing" or "waiting" or "paused"))
+                throw new PlaybackException("NO_ACTIVE_STEP", "There is no active playback step to skip in this room.");
+            if (!_devices.IsDeviceAvailable(session.Active.DeviceId))
+                throw new PlaybackException("DEVICE_UNAVAILABLE", "Аудиоустройство отключено или недоступно. Подключите устройство и запустите сценарий повторно.");
+            session.Active.RequestSkip();
         }
-
         return Task.CompletedTask;
     }
 
     public Task PauseAsync(CancellationToken cancellationToken = default)
     {
-        lock (_sync)
-        {
-            if (_active is null || _state.Status != "playing") return Task.CompletedTask;
-            _active.Pause();
-            var current = _state.Steps.FirstOrDefault(x => x.Step == _state.CurrentStep);
-            if (current is not null)
-                SetStepState(current.Step, "paused", current.PositionSeconds, 0);
-            else
-                _state = _state with { Status = "paused" };
-        }
-
-        return Task.CompletedTask;
+        var session = GetPreferredActiveSession();
+        return session is null ? Task.CompletedTask : PauseSessionAsync(session.Id, cancellationToken);
     }
 
     public Task ResumeAsync(CancellationToken cancellationToken = default)
     {
-        lock (_sync)
-        {
-            if (_active is null || _state.Status != "paused") return Task.CompletedTask;
-            _active.Resume();
-            _state = _state with { Status = "playing" };
-        }
+        var session = GetPreferredActiveSession();
+        return session is null ? Task.CompletedTask : ResumeSessionAsync(session.Id, cancellationToken);
+    }
 
-        return Task.CompletedTask;
+    private PlaybackSession? GetPreferredActiveSession()
+    {
+        lock (_sync)
+            return _sessions.Values
+                .Where(x => IsActive(x.State.Status))
+                .OrderByDescending(x => x.State.StartedAt)
+                .FirstOrDefault();
     }
 
     public async Task SetRoomVolumeAsync(Guid roomId, int volume, CancellationToken cancellationToken = default)
@@ -221,8 +313,8 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
 
         lock (_sync)
         {
-            if (_active?.RoomId == roomId)
-                _active.SetRoomVolume(volume);
+            foreach (var session in _sessions.Values)
+                if (session.Active?.RoomId == roomId) session.Active.SetRoomVolume(volume);
         }
     }
 
@@ -240,9 +332,94 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
 
         lock (_sync)
         {
-            if (_active?.AudioFileId == audioFileId)
-                _active.SetAudioGainDb(gainDb);
+            foreach (var session in _sessions.Values)
+                if (session.Active?.AudioFileId == audioFileId) session.Active.SetAudioGainDb(gainDb);
         }
+    }
+
+    private bool HasActiveSessions()
+    {
+        lock (_sync) return _sessions.Values.Any(x => IsActive(x.State.Status));
+    }
+
+    private void PruneCompletedSessions()
+    {
+        var completed = _sessions.Values
+            .Where(x => !IsActive(x.State.Status))
+            .OrderByDescending(x => x.State.FinishedAt ?? x.State.StartedAt)
+            .ToList();
+        foreach (var stale in completed.Skip(25)) _sessions.Remove(stale.Id);
+    }
+
+    private static bool IsActive(string status) => status is "starting" or "playing" or "paused" or "waiting";
+
+    private static TaskCompletionSource<bool> NewRoomSignal() =>
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private async Task ReserveRoomAsync(PlaybackSession session, Guid roomId, int stepNumber, CancellationToken token)
+    {
+        while (true)
+        {
+            token.ThrowIfCancellationRequested();
+            bool isPaused;
+            lock (_sync) isPaused = session.PauseRequested;
+            if (isPaused)
+            {
+                await Task.Delay(100, token);
+                continue;
+            }
+
+            Task waitTask;
+            lock (_sync)
+            {
+                if (!_roomOwners.TryGetValue(roomId, out var owner) || owner == session.Id)
+                {
+                    _roomOwners[roomId] = session.Id;
+                    return;
+                }
+                waitTask = _roomChanged.Task;
+            }
+
+            SetStepState(stepNumber, "waiting", 0, 0);
+            await waitTask.WaitAsync(token);
+        }
+    }
+
+    private void ReleaseRoom(Guid roomId, Guid sessionId)
+    {
+        lock (_sync)
+        {
+            if (_roomOwners.TryGetValue(roomId, out var owner) && owner == sessionId)
+            {
+                _roomOwners.Remove(roomId);
+                var previous = _roomChanged;
+                _roomChanged = NewRoomSignal();
+                previous.TrySetResult(true);
+            }
+        }
+    }
+
+    private void ReleaseSessionRooms(Guid sessionId)
+    {
+        lock (_sync)
+        {
+            var rooms = _roomOwners.Where(x => x.Value == sessionId).Select(x => x.Key).ToList();
+            if (rooms.Count == 0) return;
+            foreach (var room in rooms) _roomOwners.Remove(room);
+            var previous = _roomChanged;
+            _roomChanged = NewRoomSignal();
+            previous.TrySetResult(true);
+        }
+    }
+
+    private sealed class PlaybackSession(Guid id, CancellationTokenSource cts, PlaybackStateDto state)
+    {
+        public Guid Id { get; } = id;
+        public CancellationTokenSource Cts { get; set; } = cts;
+        public Task? Task { get; set; }
+        public PlaybackRuntime? Active { get; set; }
+        public bool PauseRequested { get; set; }
+        public PlaybackStateDto State { get; set; } = state;
     }
 
     private async Task RunScenarioAsync(
@@ -251,6 +428,9 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         Dictionary<Guid, List<string>> mappings,
         CancellationToken cancellationToken)
     {
+        var session = _currentSession.Value ?? throw new InvalidOperationException("Playback session context is missing.");
+        var previousSession = _currentSession.Value;
+        _currentSession.Value = session;
         try
         {
             var steps = scenario.Steps.OrderBy(x => x.Order).ToList();
@@ -262,6 +442,10 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
                     cancellationToken.ThrowIfCancellationRequested();
                     var step = steps[i];
                     var stepNumber = i + 1;
+
+                    // Reserve the room before applying this step's delay. A step
+                    // waiting on another session starts from the beginning once released.
+                    await ReserveRoomAsync(session, step.RoomId, stepNumber, cancellationToken);
 
                     var runtime = new PlaybackRuntime(
                         deviceId,
@@ -302,6 +486,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
                                 if (_active == runtime) _active = null;
                             }
                             SetStepState(stepNumber, "stopped", 0, 0);
+                            ReleaseRoom(step.RoomId, session.Id);
                             continue;
                         }
                     }
@@ -326,6 +511,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
                             if (_active == runtime) _active = null;
                         }
                         SetStepState(stepNumber, "stopped", 0, 0);
+                        ReleaseRoom(step.RoomId, session.Id);
                         continue;
                     }
 
@@ -335,6 +521,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
                     {
                         if (_active == runtime) _active = null;
                     }
+                    ReleaseRoom(step.RoomId, session.Id);
                 }
             } while (string.Equals(scenario.Repeat, "loop", StringComparison.OrdinalIgnoreCase));
 
@@ -350,14 +537,15 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         }
         finally
         {
+            ReleaseSessionRooms(session.Id);
             lock (_sync)
             {
                 _active?.Stop();
                 _active = null;
-                _runCts?.Dispose();
-                _runCts = null;
-                _runTask = null;
             }
+            session.Cts.Dispose();
+            session.Task = null;
+            _currentSession.Value = previousSession;
         }
     }
 
@@ -988,7 +1176,14 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
 
     public void Dispose()
     {
-        lock (_sync) _runCts?.Cancel();
+        lock (_sync)
+        {
+            foreach (var session in _sessions.Values)
+            {
+                try { session.Cts.Cancel(); }
+                catch (ObjectDisposedException) { }
+            }
+        }
     }
 }
 
