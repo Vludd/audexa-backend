@@ -109,6 +109,16 @@ namespace audexa_backend.Migrations
                     b.Property<bool>("Enabled")
                         .HasColumnType("INTEGER");
 
+                    b.Property<DateOnly?>("ExecutionDate")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("LastTriggeredAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LastExecutionStatus")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("Repeat")
                         .IsRequired()
                         .HasMaxLength(16)

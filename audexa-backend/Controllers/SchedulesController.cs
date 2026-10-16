@@ -70,8 +70,15 @@ public sealed class SchedulesController : ControllerBase
         ToggleScheduleRequest request,
         CancellationToken cancellationToken)
     {
-        var schedule = await _scheduleService.ToggleAsync(id, request, cancellationToken);
-        return schedule is null ? NotFound() : Ok(schedule);
+        try
+        {
+            var schedule = await _scheduleService.ToggleAsync(id, request, cancellationToken);
+            return schedule is null ? NotFound() : Ok(schedule);
+        }
+        catch (ScheduleValidationException ex)
+        {
+            return BadRequest(new { code = ex.Code, message = ex.Message });
+        }
     }
 
     [HttpDelete("{id:int}")]

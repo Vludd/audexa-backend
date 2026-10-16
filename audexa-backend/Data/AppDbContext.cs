@@ -145,6 +145,10 @@ public class AppDbContext : DbContext
             .HasMaxLength(16);
 
         modelBuilder.Entity<Schedule>()
+            .Property(x => x.LastExecutionStatus)
+            .HasMaxLength(32);
+
+        modelBuilder.Entity<Schedule>()
             .HasOne(x => x.Scenario)
             .WithMany()
             .HasForeignKey(x => x.ScenarioId)

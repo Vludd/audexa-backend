@@ -9,6 +9,9 @@ public sealed record ScheduleDto(
     string Repeat,
     bool Enabled,
     string Status,
+    DateOnly? ExecutionDate,
+    DateTime? LastTriggeredAt,
+    string? LastExecutionStatus,
     DateTime CreatedAt,
     DateTime UpdatedAt
 );
@@ -18,7 +21,8 @@ public sealed record CreateScheduleRequest(
     Guid ScenarioId,
     IReadOnlyList<string> Days,
     string Repeat,
-    bool Enabled
+    bool Enabled,
+    DateOnly? ExecutionDate
 );
 
 public sealed record UpdateScheduleRequest(
@@ -26,7 +30,8 @@ public sealed record UpdateScheduleRequest(
     Guid ScenarioId,
     IReadOnlyList<string> Days,
     string Repeat,
-    bool Enabled
+    bool Enabled,
+    DateOnly? ExecutionDate
 );
 
 public sealed record ToggleScheduleRequest(bool Enabled);

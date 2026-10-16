@@ -17,6 +17,13 @@ public class Schedule
 
     public bool Enabled { get; set; } = true;
 
+    public DateOnly? ExecutionDate { get; set; }
+
+    // Persisted occurrence guard prevents duplicate runs after backend restarts.
+    public DateTime? LastTriggeredAt { get; set; }
+
+    public string? LastExecutionStatus { get; set; }
+
     public DateTime CreatedAt { get; set; }
 
     public DateTime UpdatedAt { get; set; }
