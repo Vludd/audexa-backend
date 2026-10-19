@@ -18,7 +18,8 @@ public sealed record ScenarioStepDto(
     int Order,
     Guid RoomId,
     Guid AudioFileId,
-    int DelayMs
+    int DelayMs,
+    Guid? TranslationAudioFileId = null
 );
 
 public sealed record CreateScenarioRequest(
@@ -44,14 +45,16 @@ public sealed record UpdateScenarioRequest(
 public sealed record CreateScenarioStepRequest(
     Guid RoomId,
     Guid AudioFileId,
-    int DelayMs
+    int DelayMs,
+    Guid? TranslationAudioFileId = null
 );
 
 public sealed record UpdateScenarioStepRequest(
     Guid? Id,
     Guid RoomId,
     Guid AudioFileId,
-    int DelayMs
+    int DelayMs,
+    Guid? TranslationAudioFileId = null
 );
 
 public sealed record ScenarioStatusRequest(string Status);

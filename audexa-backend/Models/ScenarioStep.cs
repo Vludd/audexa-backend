@@ -18,6 +18,9 @@ public class ScenarioStep
 
     public AudioFile AudioFile { get; set; } = null!;
 
+    public Guid? TranslationAudioFileId { get; set; }
+
+    public AudioFile? TranslationAudioFile { get; set; }
 
     public int DelayMs { get; set; }
 }

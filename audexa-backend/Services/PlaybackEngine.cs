@@ -70,6 +70,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         var scenario = await db.Scenarios.AsNoTracking()
             .Include(x => x.Steps).ThenInclude(x => x.Room)
             .Include(x => x.Steps).ThenInclude(x => x.AudioFile)
+            .Include(x => x.Steps).ThenInclude(x => x.TranslationAudioFile)
             .FirstOrDefaultAsync(x => x.Id == scenarioId, cancellationToken);
 
         if (scenario is null)
@@ -95,6 +96,19 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             .GroupBy(x => x.RoomId)
             .ToDictionary(x => x.Key, x => x.Select(y => y.OutputId).Distinct(StringComparer.Ordinal).ToList());
         var steps = scenario.Steps.OrderBy(x => x.Order).ToList();
+        var translationOutputId = settings.TranslationOutputId;
+
+        if (steps.Any(x => x.TranslationAudioFileId is not null))
+        {
+            if (string.IsNullOrWhiteSpace(translationOutputId))
+                throw new PlaybackException("TRANSLATION_OUTPUT_NOT_CONFIGURED", "Для синхронного перевода не настроен отдельный аудиовыход.");
+
+            if (mappings.Values.Any(ids => ids.Contains(translationOutputId, StringComparer.Ordinal)))
+                throw new PlaybackException("TRANSLATION_OUTPUT_ASSIGNED_TO_ROOM", "Выход перевода не должен быть назначен комнате.");
+
+            if (!_devices.HasOutput(settings.DeviceId, translationOutputId))
+                throw new PlaybackException("TRANSLATION_OUTPUT_UNAVAILABLE", $"Выход перевода '{translationOutputId}' недоступен.");
+        }
 
         foreach (var step in steps)
         {
@@ -109,6 +123,16 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             var path = GetAudioPath(step.AudioFile.StorageFileName);
             if (!File.Exists(path))
                 throw new PlaybackException("AUDIO_FILE_MISSING", $"Audio file '{step.AudioFile.FileName}' is missing.");
+
+            if (step.TranslationAudioFile is not null)
+            {
+                if (step.TranslationAudioFileId == step.AudioFileId)
+                    throw new PlaybackException("INVALID_TRANSLATION_AUDIO", "Основная дорожка и перевод должны быть разными аудиофайлами.");
+
+                var translationPath = GetAudioPath(step.TranslationAudioFile.StorageFileName);
+                if (!File.Exists(translationPath))
+                    throw new PlaybackException("TRANSLATION_FILE_MISSING", $"Translation audio file '{step.TranslationAudioFile.FileName}' is missing.");
+            }
         }
 
         // StopPrevious retains its original meaning: when enabled, this scenario
@@ -128,8 +152,12 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             step.DelayMs,
             0,
             0,
-            Math.Max(0.001, step.AudioFile.Duration.TotalSeconds),
-            string.Join(",", mappings[step.RoomId]),
+            Math.Max(0.001, Math.Max(
+                step.AudioFile.Duration.TotalSeconds,
+                step.TranslationAudioFile?.Duration.TotalSeconds ?? 0)),
+            step.TranslationAudioFile is null
+                ? string.Join(",", mappings[step.RoomId])
+                : $"{string.Join(",", mappings[step.RoomId])}; translation={translationOutputId}",
             null)).ToList();
 
         var session = new PlaybackSession(sessionId, cts, new PlaybackStateDto(
@@ -155,7 +183,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         _currentSession.Value = session;
         try
         {
-            session.Task = Task.Run(() => RunScenarioAsync(scenario, settings.DeviceId, mappings, cts.Token), CancellationToken.None);
+            session.Task = Task.Run(() => RunScenarioAsync(scenario, settings.DeviceId, mappings, translationOutputId, cts.Token), CancellationToken.None);
         }
         finally { _currentSession.Value = previous; }
 
@@ -356,7 +384,12 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         lock (_sync)
         {
             foreach (var session in _sessions.Values)
-                if (session.Active?.AudioFileId == audioFileId) session.Active.SetAudioGainDb(gainDb);
+            {
+                if (session.Active?.AudioFileId == audioFileId)
+                    session.Active.SetAudioGainDb(gainDb);
+                else if (session.Active?.TranslationAudioFileId == audioFileId)
+                    session.Active.SetTranslationAudioGainDb(gainDb);
+            }
         }
     }
 
@@ -463,6 +496,7 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         Scenario scenario,
         string deviceId,
         Dictionary<Guid, List<string>> mappings,
+        string? translationOutputId,
         CancellationToken cancellationToken)
     {
         var session = _currentSession.Value ?? throw new InvalidOperationException("Playback session context is missing.");
@@ -494,7 +528,9 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
                         step.RoomId,
                         step.AudioFileId,
                         step.Room.Volume,
-                        step.AudioFile.VolumeDb);
+                        step.AudioFile.VolumeDb,
+                        step.TranslationAudioFileId,
+                        step.TranslationAudioFile?.VolumeDb ?? 0);
 
                     lock (_sync) _active = runtime;
 
@@ -540,6 +576,8 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
                         deviceId,
                         mappings[step.RoomId],
                         step.AudioFile,
+                        step.TranslationAudioFile,
+                        translationOutputId,
                         scenario,
                         step,
                         stepNumber,
@@ -559,7 +597,9 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
                         continue;
                     }
 
-                    SetStepState(stepNumber, "finished", step.AudioFile.Duration.TotalSeconds, 0);
+                    SetStepState(stepNumber, "finished", Math.Max(
+                        step.AudioFile.Duration.TotalSeconds,
+                        step.TranslationAudioFile?.Duration.TotalSeconds ?? 0), 0);
 
                     lock (_sync)
                     {
@@ -602,6 +642,8 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         string deviceId,
         IReadOnlyList<string> outputIds,
         AudioFile audio,
+        AudioFile? translationAudio,
+        string? translationOutputId,
         Scenario scenario,
         ScenarioStep step,
         int stepNumber,
@@ -612,84 +654,74 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         if (!OperatingSystem.IsWindows())
             throw new PlaybackException("UNSUPPORTED_PLATFORM", "Audio playback is supported on Windows only.");
 
-        var path = GetAudioPath(audio.StorageFileName);
-        using var source = OpenSource(path);
-        var channels = outputIds.Select(ParseOutputIndex).Distinct().ToArray();
-        if (channels.Length == 0)
-            throw new PlaybackException("OUTPUT_NOT_MAPPED", "No audio output is assigned to this room.");
-        using var output = CreateOutput(deviceId, channels, out var targetFormat);
-
-        using var provider = new RoutedWaveProvider(
-            source,
-            targetFormat,
-            channels,
-            runtime);
-
-        runtime.Attach(output, provider);
-        output.PlaybackStopped += (_, args) =>
-        {
-            if (args.Exception is not null)
-                runtime.MarkOutputError(args.Exception);
-        };
-
-        var started = DateTime.UtcNow;
-        var lastDeviceCheck = DateTime.MinValue;
-        var duration = Math.Max(0.001, audio.Duration.TotalSeconds);
+        var mainPath = GetAudioPath(audio.StorageFileName);
+        using var source = OpenSource(mainPath);
+        WaveStream? translationSource = null;
 
         try
         {
-            output.Init(provider);
-            output.Play();
-
-            while (output.PlaybackState != PlaybackState.Stopped)
+            if (translationAudio is not null)
             {
-                cancellationToken.ThrowIfCancellationRequested();
+                if (string.IsNullOrWhiteSpace(translationOutputId))
+                    throw new PlaybackException("TRANSLATION_OUTPUT_NOT_CONFIGURED", "Translation output is not configured.");
 
-                // Some WASAPI failures leave NAudio reporting PlaybackState.Playing
-                // even though the endpoint has been invalidated and no sound is
-                // produced. Check the selected endpoint independently of the
-                // output object's state, and surface native callback exceptions.
-                if (runtime.OutputError is { } outputError)
-                    throw CreateOutputFailure(outputError);
+                translationSource = OpenSource(GetAudioPath(translationAudio.StorageFileName));
+            }
 
-                var now = DateTime.UtcNow;
-                if (now - lastDeviceCheck >= TimeSpan.FromMilliseconds(300))
+            var mainChannels = outputIds.Select(ParseOutputIndex).Distinct().ToArray();
+            if (mainChannels.Length == 0)
+                throw new PlaybackException("OUTPUT_NOT_MAPPED", "No audio output is assigned to this room.");
+
+            var translationChannels = translationAudio is null
+                ? Array.Empty<int>()
+                : [ParseOutputIndex(translationOutputId!)];
+
+            if (translationChannels.Intersect(mainChannels).Any())
+                throw new PlaybackException("OUTPUT_CHANNEL_COLLISION", "Translation output overlaps a room output.");
+
+            var channels = mainChannels.Concat(translationChannels).Distinct().ToArray();
+            using var output = CreateOutput(deviceId, channels, out var targetFormat);
+            using var provider = new RoutedWaveProvider(
+                source,
+                targetFormat,
+                mainChannels,
+                runtime,
+                translationSource,
+                translationChannels);
+
+            runtime.Attach(output, provider);
+            output.PlaybackStopped += (_, args) =>
+            {
+                if (args.Exception is not null)
+                    runtime.MarkOutputError(args.Exception);
+            };
+
+            var started = DateTime.UtcNow;
+            var lastDeviceCheck = DateTime.MinValue;
+            var duration = Math.Max(0.001, Math.Max(
+                audio.Duration.TotalSeconds,
+                translationAudio?.Duration.TotalSeconds ?? 0));
+
+            try
+            {
+                output.Init(provider);
+                output.Play();
+
+                while (output.PlaybackState != PlaybackState.Stopped)
                 {
-                    lastDeviceCheck = now;
-                    if (!_devices.IsDeviceAvailable(deviceId))
-                        throw new PlaybackException(
-                            "DEVICE_UNAVAILABLE",
-                            "Аудиоустройство отключено или недоступно. Подключите устройство и запустите сценарий повторно.");
-                }
+                    cancellationToken.ThrowIfCancellationRequested();
 
-                if (runtime.SkipRequested)
-                {
-                    output.Stop();
-                    break;
-                }
+                    if (runtime.OutputError is { } outputError)
+                        throw CreateOutputFailure(outputError);
 
-                if (runtime.PauseRequested && output.PlaybackState == PlaybackState.Playing)
-                {
-                    output.Pause();
-                    SetStepState(stepNumber, "paused", runtime.PausedPosition, 0);
-                    while (runtime.PauseRequested && !runtime.SkipRequested)
+                    var now = DateTime.UtcNow;
+                    if (now - lastDeviceCheck >= TimeSpan.FromMilliseconds(300))
                     {
-                        cancellationToken.ThrowIfCancellationRequested();
-
-                        if (runtime.OutputError is { } pausedOutputError)
-                            throw CreateOutputFailure(pausedOutputError);
-
-                        var pausedNow = DateTime.UtcNow;
-                        if (pausedNow - lastDeviceCheck >= TimeSpan.FromMilliseconds(300))
-                        {
-                            lastDeviceCheck = pausedNow;
-                            if (!_devices.IsDeviceAvailable(deviceId))
-                                throw new PlaybackException(
-                                    "DEVICE_UNAVAILABLE",
-                                    "Аудиоустройство отключено или недоступно. Подключите устройство и запустите сценарий повторно.");
-                        }
-
-                        await Task.Delay(100, cancellationToken);
+                        lastDeviceCheck = now;
+                        if (!_devices.IsDeviceAvailable(deviceId))
+                            throw new PlaybackException(
+                                "DEVICE_UNAVAILABLE",
+                                "Аудиоустройство отключено или недоступно. Подключите устройство и запустите сценарий повторно.");
                     }
 
                     if (runtime.SkipRequested)
@@ -698,63 +730,86 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
                         break;
                     }
 
-                    output.Play();
-                    started = DateTime.UtcNow - TimeSpan.FromSeconds(runtime.PausedPosition);
+                    if (runtime.PauseRequested && output.PlaybackState == PlaybackState.Playing)
+                    {
+                        output.Pause();
+                        SetStepState(stepNumber, "paused", runtime.PausedPosition, 0);
+                        while (runtime.PauseRequested && !runtime.SkipRequested)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+
+                            if (runtime.OutputError is { } pausedOutputError)
+                                throw CreateOutputFailure(pausedOutputError);
+
+                            var pausedNow = DateTime.UtcNow;
+                            if (pausedNow - lastDeviceCheck >= TimeSpan.FromMilliseconds(300))
+                            {
+                                lastDeviceCheck = pausedNow;
+                                if (!_devices.IsDeviceAvailable(deviceId))
+                                    throw new PlaybackException(
+                                        "DEVICE_UNAVAILABLE",
+                                        "Аудиоустройство отключено или недоступно. Подключите устройство и запустите сценарий повторно.");
+                            }
+
+                            await Task.Delay(100, cancellationToken);
+                        }
+
+                        if (runtime.SkipRequested)
+                        {
+                            output.Stop();
+                            break;
+                        }
+
+                        output.Play();
+                        started = DateTime.UtcNow - TimeSpan.FromSeconds(runtime.PausedPosition);
+                    }
+
+                    var position = Math.Min(duration, (DateTime.UtcNow - started).TotalSeconds);
+                    if (output.PlaybackState == PlaybackState.Playing)
+                    {
+                        runtime.PausedPosition = position;
+                        SetStepState(stepNumber, "playing", position, 0);
+                    }
+
+                    if (runtime.EndOfStream)
+                    {
+                        output.Stop();
+                        break;
+                    }
+
+                    await Task.Delay(100, cancellationToken);
+                    if (output.PlaybackState == PlaybackState.Stopped)
+                        break;
                 }
 
-                var position = Math.Min(duration, (DateTime.UtcNow - started).TotalSeconds);
-                if (output.PlaybackState == PlaybackState.Playing)
+                if (!cancellationToken.IsCancellationRequested)
                 {
-                    runtime.PausedPosition = position;
-                    SetStepState(stepNumber, "playing", position, 0);
+                    if (runtime.OutputError is { } stoppedOutputError)
+                        throw CreateOutputFailure(stoppedOutputError);
+
+                    if (!_devices.IsDeviceAvailable(deviceId))
+                        throw new PlaybackException(
+                            "DEVICE_UNAVAILABLE",
+                            "Аудиоустройство отключено или недоступно. Подключите устройство и запустите сценарий повторно.");
                 }
 
-                // Some output backends can remain in Playing state for a short
-                // time after the provider has reached EOF (especially when a
-                // resampler is involved). Never leave the UI stuck at 100%.
-                if (runtime.EndOfStream)
+                if (!runtime.EndOfStream && !runtime.SkipRequested && !cancellationToken.IsCancellationRequested)
                 {
-                    output.Stop();
-                    break;
-                }
-
-                await Task.Delay(100, cancellationToken);
-
-                if (output.PlaybackState == PlaybackState.Stopped)
-                    break;
-            }
-
-            if (!cancellationToken.IsCancellationRequested)
-            {
-                if (runtime.OutputError is { } stoppedOutputError)
-                    throw CreateOutputFailure(stoppedOutputError);
-
-                // A skip request can also call Stop() on an already-invalidated
-                // WASAPI client. Do not let that turn a device failure into a
-                // successful skip followed by a permanently silent next step.
-                if (!_devices.IsDeviceAvailable(deviceId))
                     throw new PlaybackException(
-                        "DEVICE_UNAVAILABLE",
-                        "Аудиоустройство отключено или недоступно. Подключите устройство и запустите сценарий повторно.");
+                        "AUDIO_OUTPUT_STOPPED",
+                        "Аудиовыход остановился до завершения файла. Проверьте аудиоустройство и сопоставление выхода.");
+                }
             }
-
-            // A stopped output is not necessarily a successfully completed file:
-            // unplugging/disabling a device can stop the native output early.
-            // Do not silently mark that step as finished and continue the scenario.
-            if (!runtime.EndOfStream && !runtime.SkipRequested && !cancellationToken.IsCancellationRequested)
+            finally
             {
-                throw new PlaybackException(
-                    "AUDIO_OUTPUT_STOPPED",
-                    "Аудиовыход остановился до завершения файла. Проверьте аудиоустройство и сопоставление выхода.");
+                try { output.Stop(); }
+                catch (Exception ex) { runtime.MarkOutputError(ex); }
+                runtime.Detach();
             }
         }
         finally
         {
-            // Stop can itself throw after Windows invalidates a WASAPI endpoint.
-            // Do not let cleanup replace the original playback/device error.
-            try { output.Stop(); }
-            catch (Exception ex) { runtime.MarkOutputError(ex); }
-            runtime.Detach();
+            translationSource?.Dispose();
         }
     }
 
@@ -1047,25 +1102,32 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         private readonly object _sync = new();
         private RoutedWaveProvider? _provider;
         private IWavePlayer? _output;
-
         private Exception? _outputError;
+        private int _translationAudioGainDb;
 
-        public PlaybackRuntime(string deviceId, Guid roomId, Guid audioFileId, int roomVolume, int audioGainDb)
+        public PlaybackRuntime(
+            string deviceId,
+            Guid roomId,
+            Guid audioFileId,
+            int roomVolume,
+            int audioGainDb,
+            Guid? translationAudioFileId = null,
+            int translationAudioGainDb = 0)
         {
             DeviceId = deviceId;
             RoomId = roomId;
             AudioFileId = audioFileId;
+            TranslationAudioFileId = translationAudioFileId;
             RoomVolume = Math.Clamp(roomVolume, 0, 100);
             AudioGainDb = Math.Clamp(audioGainDb, -24, 24);
+            _translationAudioGainDb = Math.Clamp(translationAudioGainDb, -24, 24);
         }
 
         public string DeviceId { get; }
         public Guid RoomId { get; }
         public Guid AudioFileId { get; }
-        public Exception? OutputError
-        {
-            get { lock (_sync) return _outputError; }
-        }
+        public Guid? TranslationAudioFileId { get; }
+        public Exception? OutputError { get { lock (_sync) return _outputError; } }
         public int RoomVolume { get; private set; }
         public int AudioGainDb { get; private set; }
         public bool SkipRequested { get; private set; }
@@ -1075,20 +1137,12 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
 
         public void Attach(IWavePlayer output, RoutedWaveProvider provider)
         {
-            lock (_sync)
-            {
-                _output = output;
-                _provider = provider;
-            }
+            lock (_sync) { _output = output; _provider = provider; }
         }
 
         public void Detach()
         {
-            lock (_sync)
-            {
-                _output = null;
-                _provider = null;
-            }
+            lock (_sync) { _output = null; _provider = null; }
         }
 
         public void SetRoomVolume(int volume)
@@ -1101,6 +1155,11 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             lock (_sync) AudioGainDb = Math.Clamp(gainDb, -24, 24);
         }
 
+        public void SetTranslationAudioGainDb(int gainDb)
+        {
+            lock (_sync) _translationAudioGainDb = Math.Clamp(gainDb, -24, 24);
+        }
+
         public void RequestSkip()
         {
             lock (_sync)
@@ -1111,25 +1170,10 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             }
         }
 
-        public void Pause()
-        {
-            lock (_sync) PauseRequested = true;
-        }
-
-        public void Resume()
-        {
-            lock (_sync) PauseRequested = false;
-        }
-
-        public void MarkEndOfStream()
-        {
-            lock (_sync) EndOfStream = true;
-        }
-
-        public void MarkOutputError(Exception exception)
-        {
-            lock (_sync) _outputError ??= exception;
-        }
+        public void Pause() { lock (_sync) PauseRequested = true; }
+        public void Resume() { lock (_sync) PauseRequested = false; }
+        public void MarkEndOfStream() { lock (_sync) EndOfStream = true; }
+        public void MarkOutputError(Exception exception) { lock (_sync) _outputError ??= exception; }
 
         public void Stop()
         {
@@ -1141,41 +1185,77 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
             }
         }
 
-        public double GetGain()
+        public double GetMainGain()
         {
             lock (_sync)
-            {
                 return Math.Clamp(RoomVolume / 100d, 0d, 1d) * Math.Pow(10d, AudioGainDb / 20d);
-            }
+        }
+
+        public double GetTranslationGain()
+        {
+            lock (_sync)
+                return Math.Pow(10d, _translationAudioGainDb / 20d);
         }
     }
 
     private sealed class RoutedWaveProvider : IWaveProvider, IDisposable
     {
-        private readonly WaveStream _source;
+        private readonly WaveStream _mainSource;
+        private readonly WaveStream? _translationSource;
         private readonly WaveFormat _target;
-        private readonly int[] _channels;
+        private readonly int[] _mainChannels;
+        private readonly int[] _translationChannels;
         private readonly PlaybackRuntime _runtime;
-        private readonly MediaFoundationResampler? _resampler;
-        private readonly IWaveProvider _input;
+        private readonly MediaFoundationResampler? _mainResampler;
+        private readonly MediaFoundationResampler? _translationResampler;
+        private readonly IWaveProvider _mainInput;
+        private readonly IWaveProvider? _translationInput;
+        private bool _mainEnded;
+        private bool _translationEnded;
 
-        public RoutedWaveProvider(WaveStream source, WaveFormat target, IReadOnlyCollection<int> channels, PlaybackRuntime runtime)
+        public RoutedWaveProvider(
+            WaveStream mainSource,
+            WaveFormat target,
+            IReadOnlyCollection<int> mainChannels,
+            PlaybackRuntime runtime,
+            WaveStream? translationSource = null,
+            IReadOnlyCollection<int>? translationChannels = null)
         {
-            _source = source;
+            _mainSource = mainSource;
+            _translationSource = translationSource;
             _target = target;
-            _channels = channels.Distinct().Select(channel => Math.Clamp(channel, 0, Math.Max(0, target.Channels - 1))).ToArray();
+            _mainChannels = mainChannels.Distinct().Select(channel => Math.Clamp(channel, 0, Math.Max(0, target.Channels - 1))).ToArray();
+            _translationChannels = (translationChannels ?? Array.Empty<int>())
+                .Distinct().Select(channel => Math.Clamp(channel, 0, Math.Max(0, target.Channels - 1))).ToArray();
             _runtime = runtime;
 
-            if (source.WaveFormat.SampleRate != target.SampleRate || source.WaveFormat.Channels != 1 || source.WaveFormat.BitsPerSample != 16)
+            _mainInput = CreateMonoInput(mainSource, target.SampleRate, out var mainResampler);
+            _mainResampler = mainResampler;
+            if (translationSource is not null)
             {
-                _resampler = new MediaFoundationResampler(source, new WaveFormat(target.SampleRate, 16, 1));
-                _resampler.ResamplerQuality = 60;
-                _input = _resampler;
+                _translationInput = CreateMonoInput(translationSource, target.SampleRate, out var translationResampler);
+                _translationResampler = translationResampler;
             }
-            else
+        }
+
+        private static IWaveProvider CreateMonoInput(
+            WaveStream source,
+            int sampleRate,
+            out MediaFoundationResampler? resampler)
+        {
+            if (source.WaveFormat.SampleRate != sampleRate ||
+                source.WaveFormat.Channels != 1 ||
+                source.WaveFormat.BitsPerSample != 16)
             {
-                _input = source;
+                resampler = new MediaFoundationResampler(source, new WaveFormat(sampleRate, 16, 1))
+                {
+                    ResamplerQuality = 60
+                };
+                return resampler;
             }
+
+            resampler = null;
+            return source;
         }
 
         public WaveFormat WaveFormat => _target;
@@ -1183,44 +1263,81 @@ public sealed class PlaybackEngine : IPlaybackEngine, IDisposable
         public int Read(byte[] buffer, int offset, int count)
         {
             var bytesPerFrame = _target.BlockAlign;
-            var frames = count / bytesPerFrame;
-            if (frames <= 0) return 0;
+            var requestedFrames = count / bytesPerFrame;
+            if (requestedFrames <= 0) return 0;
 
-            var sourceBuffer = new byte[frames * 2];
-            var read = _input.Read(sourceBuffer, 0, sourceBuffer.Length);
-            var sourceFrames = read / 2;
-            if (sourceFrames == 0)
+            var mainBuffer = new byte[requestedFrames * 2];
+            var mainRead = _mainEnded ? 0 : _mainInput.Read(mainBuffer, 0, mainBuffer.Length);
+            var mainFrames = mainRead / 2;
+            if (mainFrames == 0) _mainEnded = true;
+
+            var translationBuffer = new byte[requestedFrames * 2];
+            var translationRead = 0;
+            var translationFrames = 0;
+            if (_translationInput is not null && !_translationEnded)
             {
-                _runtime.MarkEndOfStream();
+                translationRead = _translationInput.Read(translationBuffer, 0, translationBuffer.Length);
+                translationFrames = translationRead / 2;
+                if (translationFrames == 0) _translationEnded = true;
+            }
+            else if (_translationInput is null)
+            {
+                _translationEnded = true;
+            }
+
+            var framesToWrite = Math.Max(mainFrames, translationFrames);
+            if (framesToWrite == 0)
+            {
+                if (_mainEnded && _translationEnded)
+                    _runtime.MarkEndOfStream();
                 return 0;
             }
 
-            var bytesWritten = sourceFrames * bytesPerFrame;
-            Array.Clear(buffer, offset, bytesWritten);
-            var gain = _runtime.GetGain();
+            var bytesToWrite = framesToWrite * bytesPerFrame;
+            Array.Clear(buffer, offset, bytesToWrite);
+            var mainGain = (float)_runtime.GetMainGain();
+            var translationGain = (float)_runtime.GetTranslationGain();
 
-            for (var frame = 0; frame < sourceFrames; frame++)
+            for (var frame = 0; frame < framesToWrite; frame++)
             {
-                var sample = BitConverter.ToInt16(sourceBuffer, frame * 2) / 32768f * (float)gain;
-                foreach (var channel in _channels)
+                if (frame < mainFrames)
                 {
-                    var sampleOffset = offset + frame * bytesPerFrame + channel * (_target.BitsPerSample / 8);
+                    var sample = BitConverter.ToInt16(mainBuffer, frame * 2) / 32768f * mainGain;
+                    WriteSample(buffer, offset, frame, _mainChannels, sample);
+                }
 
-                    if (_target.Encoding == WaveFormatEncoding.IeeeFloat && _target.BitsPerSample == 32)
-                        BitConverter.TryWriteBytes(buffer.AsSpan(sampleOffset, 4), sample);
-                    else if (_target.Encoding == WaveFormatEncoding.Pcm && _target.BitsPerSample == 16)
-                        BitConverter.TryWriteBytes(buffer.AsSpan(sampleOffset, 2), (short)Math.Clamp(sample * short.MaxValue, short.MinValue, short.MaxValue));
-                    else if (_target.Encoding == WaveFormatEncoding.Pcm && _target.BitsPerSample == 32)
-                        BitConverter.TryWriteBytes(buffer.AsSpan(sampleOffset, 4), (int)Math.Clamp(sample * int.MaxValue, int.MinValue, int.MaxValue));
-                    else
-                        throw new PlaybackException("UNSUPPORTED_FORMAT", $"Unsupported target format {_target}");
+                if (frame < translationFrames)
+                {
+                    var sample = BitConverter.ToInt16(translationBuffer, frame * 2) / 32768f * translationGain;
+                    WriteSample(buffer, offset, frame, _translationChannels, sample);
                 }
             }
 
-            return bytesWritten;
+            return bytesToWrite;
         }
 
-        public void Dispose() => _resampler?.Dispose();
+        private void WriteSample(byte[] buffer, int offset, int frame, IReadOnlyList<int> channels, float sample)
+        {
+            foreach (var channel in channels)
+            {
+                var sampleOffset = offset + frame * _target.BlockAlign + channel * (_target.BitsPerSample / 8);
+
+                if (_target.Encoding == WaveFormatEncoding.IeeeFloat && _target.BitsPerSample == 32)
+                    BitConverter.TryWriteBytes(buffer.AsSpan(sampleOffset, 4), sample);
+                else if (_target.Encoding == WaveFormatEncoding.Pcm && _target.BitsPerSample == 16)
+                    BitConverter.TryWriteBytes(buffer.AsSpan(sampleOffset, 2), (short)Math.Clamp(sample * short.MaxValue, short.MinValue, short.MaxValue));
+                else if (_target.Encoding == WaveFormatEncoding.Pcm && _target.BitsPerSample == 32)
+                    BitConverter.TryWriteBytes(buffer.AsSpan(sampleOffset, 4), (int)Math.Clamp(sample * int.MaxValue, int.MinValue, int.MaxValue));
+                else
+                    throw new PlaybackException("UNSUPPORTED_FORMAT", $"Unsupported target format {_target}");
+            }
+        }
+
+        public void Dispose()
+        {
+            _mainResampler?.Dispose();
+            _translationResampler?.Dispose();
+        }
     }
 
     public void Dispose()

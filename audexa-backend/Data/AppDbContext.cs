@@ -168,5 +168,11 @@ public class AppDbContext : DbContext
             .WithMany()
             .HasForeignKey(x => x.AudioFileId)
             .OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<ScenarioStep>()
+            .HasOne(x => x.TranslationAudioFile)
+            .WithMany()
+            .HasForeignKey(x => x.TranslationAudioFileId)
+            .OnDelete(DeleteBehavior.Restrict);
     }
 }

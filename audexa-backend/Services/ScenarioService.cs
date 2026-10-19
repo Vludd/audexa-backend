@@ -64,7 +64,8 @@ public sealed class ScenarioService
             steps.Select(x => new StepInput(
                 x.RoomId,
                 x.AudioFileId,
-                x.DelayMs)).ToList(),
+                x.DelayMs,
+                x.TranslationAudioFileId)).ToList(),
             cancellationToken);
 
         if (normalized.Status == "active" && steps.Count == 0)
@@ -95,7 +96,8 @@ public sealed class ScenarioService
                 index,
                 step.RoomId,
                 step.AudioFileId,
-                step.DelayMs))
+                step.DelayMs,
+                step.TranslationAudioFileId))
             .ToList();
 
         _db.Scenarios.Add(scenario);
@@ -138,7 +140,8 @@ public sealed class ScenarioService
             requestedSteps.Select(x => new StepInput(
                 x.RoomId,
                 x.AudioFileId,
-                x.DelayMs)).ToList(),
+                x.DelayMs,
+                x.TranslationAudioFileId)).ToList(),
             cancellationToken);
 
         if (normalized.Status == "active" && requestedSteps.Count == 0)
@@ -182,7 +185,8 @@ public sealed class ScenarioService
                 index,
                 step.RoomId,
                 step.AudioFileId,
-                step.DelayMs))
+                step.DelayMs,
+                step.TranslationAudioFileId))
             .ToList();
 
         if (newSteps.Count > 0)
@@ -234,6 +238,8 @@ public sealed class ScenarioService
                 .ThenInclude(x => x.Room)
             .Include(x => x.Steps)
                 .ThenInclude(x => x.AudioFile)
+            .Include(x => x.Steps)
+                .ThenInclude(x => x.TranslationAudioFile)
             .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
 
         if (scenario is null)
@@ -326,6 +332,53 @@ public sealed class ScenarioService
                 }
             }
 
+            if (step.TranslationAudioFileId is not null)
+            {
+                if (step.TranslationAudioFile is null)
+                {
+                    errors.Add($"Step {number}: translation audio file '{step.TranslationAudioFileId}' was not found.");
+                }
+                else
+                {
+                    var translationPath = GetAudioPath(step.TranslationAudioFile.StorageFileName);
+                    if (!File.Exists(translationPath))
+                    {
+                        errors.Add($"Step {number}: translation audio file '{step.TranslationAudioFile.FileName}' is missing from storage.");
+                    }
+
+                    if (step.TranslationAudioFile.Duration <= TimeSpan.Zero)
+                    {
+                        warnings.Add($"Step {number}: translation audio file '{step.TranslationAudioFile.FileName}' has no valid duration metadata.");
+                    }
+                    else if (step.AudioFile is not null && step.AudioFile.Duration > TimeSpan.Zero)
+                    {
+                        var difference = Math.Abs((step.AudioFile.Duration - step.TranslationAudioFile.Duration).TotalSeconds);
+                        if (difference >= 1)
+                        {
+                            warnings.Add($"Step {number}: translation duration differs from the main audio by {difference:0.#} seconds.");
+                        }
+                    }
+                }
+
+                if (string.IsNullOrWhiteSpace(settings?.TranslationOutputId))
+                {
+                    errors.Add($"Step {number}: translation audio is selected, but no translation output is configured.");
+                }
+                else
+                {
+                    if (mappings.Values.Any(ids => ids.Contains(settings.TranslationOutputId, StringComparer.Ordinal)))
+                    {
+                        errors.Add($"Step {number}: translation output '{settings.TranslationOutputId}' is also assigned to a room.");
+                    }
+
+                    if (device is not null && string.Equals(device.Status, "online", StringComparison.OrdinalIgnoreCase) &&
+                        !_audioDevices.HasOutput(settings.DeviceId!, settings.TranslationOutputId))
+                    {
+                        errors.Add($"Step {number}: translation output '{settings.TranslationOutputId}' is not available on the configured audio device.");
+                    }
+                }
+            }
+
             if (step.DelayMs < 0)
             {
                 errors.Add($"Step {number}: delay cannot be negative.");
@@ -353,7 +406,9 @@ public sealed class ScenarioService
             .ToList();
 
         var audioIds = steps
-            .Select(x => x.AudioFileId)
+            .SelectMany(x => x.TranslationAudioFileId is Guid translationId
+                ? new[] { x.AudioFileId, translationId }
+                : new[] { x.AudioFileId })
             .Distinct()
             .ToList();
 
@@ -379,6 +434,18 @@ public sealed class ScenarioService
             {
                 errors.Add(
                     $"Step {step.index + 1}: audio file '{step.value.AudioFileId}' was not found.");
+            }
+
+            if (step.value.TranslationAudioFileId is Guid translationId &&
+                !existingAudioIds.Contains(translationId))
+            {
+                errors.Add(
+                    $"Step {step.index + 1}: translation audio file '{translationId}' was not found.");
+            }
+            else if (step.value.TranslationAudioFileId == step.value.AudioFileId)
+            {
+                errors.Add(
+                    $"Step {step.index + 1}: main audio and translation must use different audio files.");
             }
 
             if (step.value.DelayMs < 0)
@@ -496,7 +563,8 @@ public sealed class ScenarioService
         int order,
         Guid roomId,
         Guid audioFileId,
-        int delayMs)
+        int delayMs,
+        Guid? translationAudioFileId)
     {
         return new ScenarioStep
         {
@@ -505,6 +573,7 @@ public sealed class ScenarioService
             Order = order,
             RoomId = roomId,
             AudioFileId = audioFileId,
+            TranslationAudioFileId = translationAudioFileId,
             DelayMs = delayMs
         };
     }
@@ -528,7 +597,8 @@ public sealed class ScenarioService
                     x.Order,
                     x.RoomId,
                     x.AudioFileId,
-                    x.DelayMs))
+                    x.DelayMs,
+                    x.TranslationAudioFileId))
                 .ToList());
     }
 
@@ -543,7 +613,8 @@ public sealed class ScenarioService
     private sealed record StepInput(
         Guid RoomId,
         Guid AudioFileId,
-        int DelayMs);
+        int DelayMs,
+        Guid? TranslationAudioFileId);
 }
 
 public sealed class ScenarioValidationException : Exception
