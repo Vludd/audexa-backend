@@ -70,14 +70,19 @@ if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
+
+    app.UseCors("Frontend");
 }
 
-// Audexa runs as a local desktop backend.
-// The React frontend connects to the loopback HTTP endpoint.
-app.UseCors("Frontend");
+app.UseDefaultFiles();
+app.UseStaticFiles();
 
 app.UseAuthorization();
 
 app.MapControllers();
+
+// React SPA fallback: serve index.html for client-side routes,
+// but leave API routes to controllers.
+app.MapFallbackToFile("index.html");
 
 app.Run();
