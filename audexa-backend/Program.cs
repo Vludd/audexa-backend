@@ -5,6 +5,8 @@ using audexa_backend.Logging;
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.WebHost.UseUrls("http://127.0.0.1:5081");
+
 // Database Path
 
 var appDataPath = Environment.GetFolderPath(
@@ -35,7 +37,7 @@ builder.Services.AddCors(options =>
     options.AddPolicy("Frontend", policy =>
     {
         policy
-            .WithOrigins("http://localhost:5173")
+            .WithOrigins("http://localhost:5173", "https://appassets.audexa")
             .AllowAnyHeader()
             .AllowAnyMethod();
     });
@@ -70,19 +72,14 @@ if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
-
-    app.UseCors("Frontend");
 }
 
-app.UseDefaultFiles();
-app.UseStaticFiles();
+// Audexa runs as a local desktop backend.
+// The React frontend connects to the loopback HTTP endpoint.
+app.UseCors("Frontend");
 
 app.UseAuthorization();
 
 app.MapControllers();
-
-// React SPA fallback: serve index.html for client-side routes,
-// but leave API routes to controllers.
-app.MapFallbackToFile("index.html");
 
 app.Run();
